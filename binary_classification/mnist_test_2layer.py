@@ -36,10 +36,10 @@ tf.config.set_visible_devices([], 'GPU')
 # --- Configuration ---
 BATCH_SIZE = 128
 LEARNING_RATE = 0.001
-EPOCHS = 1000
+EPOCHS = 10
 HIDDEN_DIM = 512
 SEED = 42
-DATA_DIR = "/home/users/MTrappett/mtrl/RepresentationSimilarityCL/manifold/data/"
+DATA_DIR = "./data/"
 
 # --- Data Loading (using tensorflow_datasets) ---
 def get_dataset(name, split, batch_size):
@@ -100,8 +100,8 @@ class TwoLayerMLP(nnx.Module):
 
 # --- Training & Evaluation Steps ---
 @staticmethod
-@nnx.jit
-def train_step(model: TwoLayerMLP, optimizer: nnx.Optimizer, batch):
+@nnx.jit(static_argnums=(3,))
+def train_step(model: TwoLayerMLP, optimizer: nnx.Optimizer, batch, filter_spec):
     images, labels = batch
     
     def loss_fn(model):
@@ -111,12 +111,10 @@ def train_step(model: TwoLayerMLP, optimizer: nnx.Optimizer, batch):
         ).mean()
         return loss
 
+    diff_state = nnx.DiffState(0, filter_spec)
     # Compute gradients
-    grad = nnx.grad(loss_fn)(model)
-    grad = nnx.State({
-        k: (v if k.startswith('linear1') else jnp.zeros_like(v)) 
-        for k, v in grad.items()
-    })
+    grad = nnx.grad(loss_fn, argnums=diff_state)(model)
+    # jax.debug.print("grad: {grd}", grd=grad.items())
     optimizer.update(model, grad)
     
     # Calculate simple accuracy for reporting
@@ -147,8 +145,11 @@ def run_experiment(dataset_name):
     # 2. Initialize Model & Optimizer
     rngs = nnx.Rngs(SEED)
     model = TwoLayerMLP(din=784, hidden=HIDDEN_DIM, dout=10, rngs=rngs)
+    train_filter = nnx.All(nnx.Param, nnx.PathContains('linear1'))
     
-    optimizer = nnx.Optimizer(model, optax.adam(LEARNING_RATE), wrt=nnx.Param)
+    optimizer = nnx.Optimizer(model,
+                            optax.adam(LEARNING_RATE), 
+                            wrt=train_filter )
 
     # Metrics storage
     history = {
@@ -166,7 +167,7 @@ def run_experiment(dataset_name):
         # Train
         batch_accs = []
         for batch in train_iter:
-            acc = train_step(model, optimizer, batch)
+            acc = train_step(model, optimizer, batch, train_filter)
             batch_accs.append(acc)
         train_acc = np.mean(batch_accs)
         
@@ -185,7 +186,7 @@ def run_experiment(dataset_name):
         history['test_acc'].append(test_acc)
         history['test_loss'].append(test_loss)
         
-        print(f"Epoch {epoch+1}/{EPOCHS} | Train Acc: {train_acc:.4f} | Test Acc: {test_acc:.4f} | Test Loss: {test_loss:.4f}")
+        # print(f"Epoch {epoch+1}/{EPOCHS} | Train Acc: {train_acc:.4f} | Test Acc: {test_acc:.4f} | Test Loss: {test_loss:.4f}")
 
     return history
 
