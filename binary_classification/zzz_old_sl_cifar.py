@@ -128,7 +128,7 @@ class ContinualLearner:
             global_history['train_acc'].append(avg_train_acc)
 
             # 2. Universal Evaluation Loop
-            print(f"Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f} | Train Acc: {avg_train_acc:.4f}")
+            # print(f"Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f} | Train Acc: {avg_train_acc:.4f}")
             
             for t_name, t_ds in test_streams.items():
                 test_iter = tfds.as_numpy(t_ds)

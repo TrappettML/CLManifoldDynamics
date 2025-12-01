@@ -1,5 +1,6 @@
 import tensorflow as tf
 import tensorflow_datasets as tfds
+import numpy as np
 
 # --- Dataset Metadata ---
 DATASET_CONFIGS = {
@@ -59,6 +60,30 @@ class CLTask:
         full_ds = full_ds.batch(self.batch_size, drop_remainder=True)
         full_ds = full_ds.prefetch(tf.data.AUTOTUNE)
         return full_ds
+    
+    def load_mandi_subset(self, samples_per_class):
+        """
+        Loads exactly samples_per_class for each class definition in this task.
+        Returns a single unbatched dataset of size (2 * samples_per_class).
+        """
+        datasets = []
+        for comp in self.class_definitions:
+            # Load raw stream
+            ds = self._load_single_source(comp['dataset'], comp['original_label'], comp['binary_label'])
+            # Take exactly N samples
+            ds = ds.take(samples_per_class)
+            datasets.append(ds)
+
+        # Merge them
+        full_ds = datasets[0]
+        for next_ds in datasets[1:]:
+            full_ds = full_ds.concatenate(next_ds)
+        
+        # Batch effectively creates one large array since we want them all at once
+        total_samples = samples_per_class * len(datasets)
+        full_ds = full_ds.batch(total_samples)
+        return full_ds
+    
 
 def create_continual_tasks(config, split='train'):
     """
@@ -97,3 +122,67 @@ def create_continual_tasks(config, split='train'):
         tasks.append(task)
         
     return tasks
+
+
+def save_task_samples_grid(tasks, config, output_file="task_samples_grid.png"):
+    """
+    Generates a grid of example images: Rows = Tasks, Columns = Binary Labels (0, 1).
+    """
+    import matplotlib.pyplot as plt
+    import tensorflow_datasets as tfds
+
+    num_tasks = len(tasks)
+    # Create subplots: Rows = tasks, Cols = 2 (Label 0 and Label 1)
+    fig, axes = plt.subplots(num_tasks, 2, figsize=(6, 3 * num_tasks))
+    
+    # Handle single task edge case (axes is 1D array)
+    if num_tasks == 1:
+        axes = axes.reshape(1, -1)
+
+    print(f"\nGenerating sample grid for {num_tasks} tasks...")
+
+    for i, task in enumerate(tasks):
+        # 1. Load exactly 1 sample per class using existing utility
+        # This returns a single batch containing [Class 0 Image, Class 1 Image]
+        subset_ds = task.load_mandi_subset(samples_per_class=1)
+        ds_numpy = tfds.as_numpy(subset_ds)
+        
+        # Extract the batch (images, labels)
+        batch_images, batch_labels = next(iter(ds_numpy))
+        
+        # 2. Iterate through the binary labels (0 and 1)
+        for binary_label in [0, 1]:
+            ax = axes[i, binary_label]
+            
+            # Get the image corresponding to this label
+            # batch_labels is shape (2, 1) or (2,), find index of current label
+            idx = np.where(batch_labels.flatten() == binary_label)[0][0]
+            flat_img = batch_images[idx]
+            
+            # 3. Reshape Flat Vector -> Image
+            # Logic based on config.dataset_name
+            if config.dataset_name in ['mnist', 'fashion_mnist']:
+                img = flat_img.reshape(28, 28)
+                cmap = 'gray'
+            elif config.dataset_name == 'cifar100':
+                img = flat_img.reshape(32, 32, 3)
+                cmap = None
+            else:
+                # Fallback for unknown dims, try square root
+                side = int(np.sqrt(flat_img.shape[0]))
+                img = flat_img.reshape(side, side)
+                cmap = 'gray'
+
+            # 4. Plot
+            ax.imshow(img, cmap=cmap)
+            
+            # Get original class ID for the title (e.g., "7 vs 9")
+            orig_label = task.class_definitions[binary_label]['original_label']
+            
+            ax.set_title(f"Task {task.task_id} | Label {binary_label}\n(Original Class: {orig_label})", fontsize=10)
+            ax.axis('off')
+
+    plt.tight_layout()
+    plt.savefig(f"{config.figures_dir}/{output_file}")
+    print(f"Saved task sample grid to {output_file}")
+    plt.close()
