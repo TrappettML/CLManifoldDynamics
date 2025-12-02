@@ -4,6 +4,7 @@ import optax
 import numpy as np
 import tensorflow_datasets as tfds
 from functools import partial
+from jax import flatten_util
 from state import create_vectorized_state
 from models import TwoLayerMLP
 
@@ -15,6 +16,10 @@ class ContinualLearner:
         # Initialize States (Vectorized)
         rng = jax.random.key(config.seed)
         self.state = create_vectorized_state(config, rng)
+        
+        # Create a flatten function based on the model structure
+        # We grab a single instance's params to define the structure
+        self._flat_fn = lambda p: flatten_util.ravel_pytree(p)[0]
 
     def preload_data(self, tfds_dataset):
         """Converts TFDS to JAX-ready numpy arrays."""
@@ -28,6 +33,14 @@ class ContinualLearner:
         labels = np.stack(labels)
         if labels.ndim == 2: labels = labels[..., None]
         return jnp.array(images), jnp.array(labels)
+
+    def get_flat_params(self, state):
+        """
+        Flattens parameters for all seeds.
+        Returns: (n_repeats, total_param_count)
+        """
+        # We use vmap to flatten each seed's parameters independently
+        return jax.vmap(self._flat_fn)(state.params)
 
     # --- JIT Compiled Core Logic ---
 
@@ -72,21 +85,17 @@ class ContinualLearner:
 
         return jax.vmap(eval_single)(state)
 
-    # === NEW: Feature Extraction JIT ===
+    # === Feature Extraction JIT ===
     @partial(jax.jit, static_argnums=(0,))
     def _extract_features_jit(self, state, images):
         """
         Extracts hidden representations for all seeds.
         Output Shape: (n_repeats, n_images, hidden_dim)
         """
-        # Flatten batch dimension if present, as we just want a list of representations
-        # Handle case where images are (batches, batch_size, dim) vs (total_samples, dim)
-        if images.ndim == 4: # (Batches, H, W, C) or similar, depends on flattening
-             # If data loader returns (Num_Batches, Batch_Size, Input_Dim)
+        if images.ndim == 4: 
              images = images.reshape(-1, images.shape[-1])
         
         def extract_single(curr_state):
-            # Access the 'get_features' method defined in models.py
             features = curr_state.apply_fn(
                 {'params': curr_state.params}, 
                 images, 
@@ -100,30 +109,27 @@ class ContinualLearner:
 
     def train_task(self, task, test_streams, global_history, analysis_subset=None):
         """
-        Args:
-            analysis_subset: (Optional) tf.data.Dataset or tuple of arrays 
-                             containing the 'mandi' subset for representation tracking.
+        Returns:
+            representation_history: List of arrays (epochs, repeats, samples, hidden)
+            weight_history: List of arrays (epochs, repeats, total_params)
         """
         print(f"--- CL Training on {task.name} (x{self.config.n_repeats} Repeats) ---")
         
-        # Hooks: Task Start
         for h in self.hooks: h.on_task_start(task, self.state)
 
-        # Data Loading
         train_ds = task.load_data()
         train_imgs, train_lbls = self.preload_data(train_ds)
         
-        # Prepare Analysis Data (Preload to GPU once)
         analysis_imgs = None
-        representation_history = [] # Store CPU arrays here
+        representation_history = [] 
+        weight_history = [] # Store weights
+
         if analysis_subset:
             print(f"    > Preloading analysis subset for representation tracking...")
             analysis_imgs, _ = self.preload_data(analysis_subset)
-            # Reshape analysis_imgs to be 2D (Total_Samples, Input_Dim) if it came in batches
             if analysis_imgs.ndim > 2:
                 analysis_imgs = analysis_imgs.reshape(-1, analysis_imgs.shape[-1])
 
-        # Ensure test cache exists
         if not hasattr(self, 'cached_test_data'):
             self.cached_test_data = {}
             for t_name, t_ds in test_streams.items():
@@ -137,7 +143,6 @@ class ContinualLearner:
                 self.state, train_imgs, train_lbls
             )
             
-            # Record Train Metrics
             global_history['train_loss_mean'].append(np.mean(epoch_losses))
             global_history['train_loss_std'].append(np.std(epoch_losses))
             global_history['train_acc_mean'].append(np.mean(epoch_accs))
@@ -146,7 +151,6 @@ class ContinualLearner:
             # 2. EVAL
             for t_name, (t_imgs, t_lbls) in self.cached_test_data.items():
                 t_loss, t_acc = self._eval_jit(self.state, t_imgs, t_lbls)
-                
                 global_history['test_metrics'][t_name]['acc_mean'].append(np.mean(t_acc))
                 global_history['test_metrics'][t_name]['acc_std'].append(np.std(t_acc))
                 global_history['test_metrics'][t_name]['loss_mean'].append(np.mean(t_loss))
@@ -154,17 +158,17 @@ class ContinualLearner:
                 if t_name == task.name and epoch == self.config.epochs_per_task - 1:
                      print(f"    > Epoch {epoch+1} | {t_name} Acc: {np.mean(t_acc):.4f} ± {np.std(t_acc):.4f}")
             
-            # 3. CAPTURE REPRESENTATIONS (New)
+            # 3. CAPTURE DATA (Reps + Weights)
+            # Capture Weights
+            flat_w_gpu = self.get_flat_params(self.state)
+            weight_history.append(np.array(flat_w_gpu)) # Transfer to CPU
+
             if analysis_imgs is not None:
-                # Extract on GPU
                 reps_gpu = self._extract_features_jit(self.state, analysis_imgs)
-                # Transfer to CPU immediately to free VRAM
-                reps_cpu = np.array(reps_gpu)
-                representation_history.append(reps_cpu)
+                representation_history.append(np.array(reps_gpu))
 
             for h in self.hooks: h.on_epoch_end(epoch, self.state, metrics=None)
 
-        # Hooks: Task End
         for h in self.hooks: h.on_task_end(task, self.state, metrics=None)
         
-        return representation_history
+        return representation_history, weight_history
