@@ -25,10 +25,15 @@ def create_vectorized_state(config, rng):
         dummy_input = jnp.ones((1, config.input_dim))
         variables = model.init(key, dummy_input)
         params = variables['params']
-        partition_optimizers = {'trainable': optax.sgd(config.learning_rate),
-                                'frozen': optax.set_to_zero()}
+        partition_optimizers = {'feature': optax.chain(
+                                optax.add_decayed_weights(config.weight_decay),
+                                optax.sgd(config.learning_rate1)
+                                ),
+                                'readout': optax.sgd(config.learning_rate2)
+                                }
+        
         param_partitions = traverse_util.path_aware_map(
-            lambda path, v: 'frozen' if 'layer2' in path else 'trainable', params
+            lambda path, v: 'readout' if 'layer2' in path else 'feature', params
             )
         tx = optax.multi_transform(partition_optimizers, param_partitions)
         # tx = optax.SGD(config.learning_rate)
