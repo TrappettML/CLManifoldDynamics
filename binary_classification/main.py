@@ -91,32 +91,55 @@ def main():
 
     # 5. Plotting
     print("\nGenerating Plots...")
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12), sharex=True)
+    
+    # --- Styling Setup ---
+    plt.rcParams.update({
+        'font.size': 12,
+        'axes.titlesize': 14,
+        'axes.labelsize': 13,
+        'xtick.labelsize': 11,
+        'ytick.labelsize': 11,
+        'legend.fontsize': 10,
+        'lines.linewidth': 2
+    })
+    
+    # Use a more compact figure size (Width, Height)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
     
     epochs_range = np.arange(1, total_epochs + 1)
     task_names = [t.name for t in train_tasks]
-    colormap = plt.cm.jet(np.linspace(0, 1, len(task_names)))
-    color_dict = {name: color for name, color in zip(task_names, colormap)}
-
-    # Plot Train Accuracy (Dense)
-    train_acc_raw = np.array(global_history['train_acc'])
     
-    # Handle list extension correctly: global_history is a list of arrays (Repeats,)
-    # np.array() creates (TotalEpochs, Repeats).
-    if train_acc_raw.ndim == 1:
-        # Fallback if flattening happened
-        train_acc_raw = train_acc_raw.reshape(-1, config.n_repeats)
+    # Use a high-quality qualitative colormap (tab10 is standard for categorical data)
+    cmap = plt.get_cmap('tab10')
+    color_dict = {name: cmap(i % 10) for i, name in enumerate(task_names)}
+
+    # Helper to clean up the plot area
+    def setup_axis(ax, ylabel):
+        ax.grid(True, linestyle='--', alpha=0.4)
+        ax.set_ylabel(ylabel, fontweight='bold')
+        # Draw Task Boundaries
+        for i, boundary in enumerate(task_boundaries[:-1]):
+            ax.axvline(x=boundary, color='#333333', linestyle='-', alpha=0.3, linewidth=1.5)
+            if i < len(task_names) - 1:
+                # Add label slightly offset from the boundary
+                ax.text(boundary + (total_epochs*0.01), ax.get_ylim()[0], f"End T{i+1}", 
+                        rotation=90, verticalalignment='bottom', fontsize=9, color='#555555')
+
+    # --- Plot 1: Accuracy ---
+    train_acc_raw = np.array(global_history['train_acc'])
+    if train_acc_raw.ndim == 1: train_acc_raw = train_acc_raw.reshape(-1, config.n_repeats)
 
     train_mean = np.mean(train_acc_raw, axis=1)
     train_std = np.std(train_acc_raw, axis=1)
     
-    ax1.plot(epochs_range, train_mean, label='Current Train Acc', color='grey', linestyle='--', alpha=0.4)
-    ax1.fill_between(epochs_range, train_mean - train_std, train_mean + train_std, color='grey', alpha=0.2)
+    # Current Task Performance (Grey)
+    ax1.plot(epochs_range, train_mean, label='Current Task (Train)', color='grey', linestyle='-', alpha=0.3, linewidth=1)
     
     for t_name in task_names:
         metrics = global_history['test_metrics'][t_name]
         color = color_dict[t_name]
         
+        # Continual Learning Curve
         acc_raw = np.array(metrics['acc'])
         if acc_raw.ndim == 1: acc_raw = acc_raw.reshape(-1, config.n_repeats)
 
@@ -127,10 +150,11 @@ def main():
         
         mask = ~np.isnan(mean)
         if mask.any():
-            ax1.plot(epochs_range[mask], mean[mask], label=f"{t_name} (CL)", color=color, linewidth=2)
+            ax1.plot(epochs_range[mask], mean[mask], label=f"{t_name} (CL)", color=color, linewidth=2.5)
+            # Add subtle fill for variance
             ax1.fill_between(epochs_range[mask], mean[mask] - std[mask], mean[mask] + std[mask], color=color, alpha=0.1)
         
-        # Expert
+        # Expert Baseline
         if t_name in expert_stats:
             estats = expert_stats[t_name]
             task_idx = task_names.index(t_name)
@@ -138,22 +162,30 @@ def main():
             expert_x = np.arange(start_epoch + 1, start_epoch + len(estats['acc_mean']) + 1)
             emean = estats['acc_mean']
             emask = ~np.isnan(emean)
+            
             if emask.any():
-                ax1.plot(expert_x[emask], emean[emask], color=color, linestyle=':', linewidth=2.5, alpha=0.8)
+                # IMPROVED VISIBILITY: Dashed line, darker/thinner or distinct style
+                ax1.plot(expert_x[emask], emean[emask], color=color, linestyle='--', linewidth=2.0, alpha=0.9, 
+                         label=f"{t_name} (Expert)")
 
-    ax1.set_ylabel('Accuracy')
-    # Move legend inside or adjust bbox to prevent cut-off with tight_layout
-    ax1.legend(loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0.)
-    ax1.grid(True, alpha=0.3)
+    setup_axis(ax1, 'Accuracy')
+    ax1.set_ylim(-0.05, 1.05)
+    
+    # Consolidate legend to the right
+    handles, labels = ax1.get_legend_handles_labels()
+    # Filter duplicate labels if any
+    by_label = dict(zip(labels, handles))
+    ax1.legend(by_label.values(), by_label.keys(), loc='center left', bbox_to_anchor=(1.02, 0.5), title="Legend")
 
-    # Plot Loss
+    # --- Plot 2: Loss ---
     train_loss_raw = np.array(global_history['train_loss'])
     if train_loss_raw.ndim == 1: train_loss_raw = train_loss_raw.reshape(-1, config.n_repeats)
     loss_mean = np.mean(train_loss_raw, axis=1)
     
-    ax2.plot(epochs_range, loss_mean, label='Current Train Loss', color='grey', linestyle='--', alpha=0.4)
+    ax2.plot(epochs_range, loss_mean, label='Current Task (Train)', color='grey', linestyle='-', alpha=0.3, linewidth=1)
     
     for t_name in task_names:
+        color = color_dict[t_name]
         loss_raw = np.array(global_history['test_metrics'][t_name]['loss'])
         if loss_raw.ndim == 1: loss_raw = loss_raw.reshape(-1, config.n_repeats)
         
@@ -163,7 +195,7 @@ def main():
         
         mask = ~np.isnan(mean)
         if mask.any():
-            ax2.plot(epochs_range[mask], mean[mask], label=f"{t_name}", color=color, linewidth=2)
+            ax2.plot(epochs_range[mask], mean[mask], label=f"{t_name}", color=color, linewidth=2.5)
             
         if t_name in expert_stats:
              estats = expert_stats[t_name]
@@ -173,19 +205,17 @@ def main():
              emean = estats['loss_mean']
              emask = ~np.isnan(emean)
              if emask.any():
-                 ax2.plot(expert_x[emask], emean[emask], color=color, linestyle=':', linewidth=2.5, alpha=0.8)
+                 ax2.plot(expert_x[emask], emean[emask], color=color, linestyle='--', linewidth=2.0, alpha=0.9)
 
-    ax2.set_ylabel('Loss')
-    ax2.set_xlabel('Total Epochs')
-    for boundary in task_boundaries[:-1]:
-        ax1.axvline(x=boundary, color='black', alpha=0.5)
-        ax2.axvline(x=boundary, color='black', alpha=0.5)
-
-    # Use constrained_layout or adjust subplots manually to fit external legend
-    plt.tight_layout()
-    plt.subplots_adjust(right=0.85) # Make room for legend
-    plt.savefig(f'{config.figures_dir}/sl_{config.dataset_name}_{config.num_tasks}_tasks.png')
-    print(f"Plots saved.")
+    setup_axis(ax2, 'Loss')
+    ax2.set_xlabel('Total Epochs', fontweight='bold')
+    
+    # Adjust layout to make room for the legend on the right
+    plt.tight_layout(rect=[0, 0, 0.82, 1]) 
+    
+    save_path = f'{config.figures_dir}/sl_{config.dataset_name}_{config.num_tasks}_tasks.png'
+    plt.savefig(save_path, dpi=150) # Increase DPI for better text clarity
+    print(f"Improved plots saved to {save_path}")
     
     # 6. Analysis
     analysis.run_analysis_pipeline(config)

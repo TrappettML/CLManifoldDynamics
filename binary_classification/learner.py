@@ -195,12 +195,27 @@ class ContinualLearner:
         global_history['train_loss'].extend(tr_loss_dense)
         global_history['train_acc'].extend(tr_acc_dense)
 
+        # FIX: Populate sparse evaluation points with actual values, leave others as NaN.
+        # This prevents "stair steps" in the plot and allows matplotlib to connect the dots correctly.
         for t_name in history_np['test'].keys():
-            sparse_loss = history_np['test'][t_name][0]
+            sparse_loss = history_np['test'][t_name][0] # Shape: (n_outer_steps, n_repeats)
             sparse_acc = history_np['test'][t_name][1]
             
-            dense_loss = np.repeat(sparse_loss, self.config.log_frequency, axis=0)
-            dense_acc = np.repeat(sparse_acc, self.config.log_frequency, axis=0)
+            n_outer = sparse_loss.shape[0]
+            n_repeats = sparse_loss.shape[1]
+            total_block_len = n_outer * self.config.log_frequency
+            
+            # Initialize with NaNs
+            dense_loss = np.full((total_block_len, n_repeats), np.nan)
+            dense_acc = np.full((total_block_len, n_repeats), np.nan)
+            
+            # Identify indices corresponding to the end of each log block
+            # If log_freq=10, we want indices 9, 19, 29...
+            eval_indices = np.arange(self.config.log_frequency - 1, total_block_len, self.config.log_frequency)
+            
+            # Assign values
+            dense_loss[eval_indices] = sparse_loss
+            dense_acc[eval_indices] = sparse_acc
             
             global_history['test_metrics'][t_name]['loss'].extend(dense_loss)
             global_history['test_metrics'][t_name]['acc'].extend(dense_acc)
