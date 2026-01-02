@@ -22,7 +22,12 @@ def get_config():
     config.n_repeats = 20
 
     config.mandi_samples = 50 
+    config.eval_freq = 10  
 
     config.weight_decay = 0.0
+    # --- Early Stopping Config ---
+    config.early_stopping = False
+    config.patience = 50          # Epochs to wait before stopping
+    config.min_delta = 1e-4       # Minimum improvement required
     
     return config

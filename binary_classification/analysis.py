@@ -7,9 +7,8 @@ from numpy.linalg import svd, norm
 
 def compute_rep_metrics(representations, tau=0.1):
     """
-    Computes representation-based metrics (Dormant Neurons, Ranks, etc.)
-    Args:
-        representations: (n_repeats, n_samples, hidden_dim)
+    Computes metrics, handling Potential NaNs in input.
+    representations: (n_repeats, n_samples, hidden_dim)
     """
     n_repeats, n_samples, hidden_dim = representations.shape
     
@@ -25,6 +24,11 @@ def compute_rep_metrics(representations, tau=0.1):
     for r in range(n_repeats):
         F = representations[r]
         
+        # Check for NaNs (if user decided to NaN out stopped models)
+        if np.isnan(F).any():
+            for k in metrics: metrics[k].append(np.nan)
+            continue
+            
         # F.1 Dormant Neurons (Ratio)
         avg_activation_per_neuron = np.mean(F, axis=0)
         layer_mean_activation = np.mean(avg_activation_per_neuron)
@@ -80,13 +84,6 @@ def compute_rep_metrics(representations, tau=0.1):
     return metrics
 
 def compute_weight_metrics(current_weights, start_of_task_weights, init_weights):
-    """
-    Computes weight-based metrics (F.5, F.6).
-    Args:
-        current_weights: (n_repeats, total_params)
-        start_of_task_weights: (n_repeats, total_params) - Reference for WD (Task)
-        init_weights: (n_repeats, total_params) - Reference for WD (Init)
-    """
     n_repeats, n_params = current_weights.shape
     
     metrics = {
@@ -100,18 +97,19 @@ def compute_weight_metrics(current_weights, start_of_task_weights, init_weights)
         w_task_ref = start_of_task_weights[r]
         w_init_ref = init_weights[r]
         
+        if np.isnan(w).any():
+             for k in metrics: metrics[k].append(np.nan)
+             continue
+
         # --- F.5 Weight Magnitude ---
-        # Eq 15: sqrt(sum(theta^2) / |Theta|) = RMS of weights
         wm = np.sqrt(np.mean(w**2))
         metrics['Weight Magnitude'].append(wm)
         
         # --- F.6 Weight Difference (Task-Level) ---
-        # Eq 16: Distance from START OF CURRENT TASK
         wd_task = np.sqrt(np.mean((w - w_task_ref)**2))
         metrics['Weight Difference (Task)'].append(wd_task)
 
         # --- F.6 Weight Difference (From Initialization) ---
-        # Distance from RANDOM INITIALIZATION
         wd_init = np.sqrt(np.mean((w - w_init_ref)**2))
         metrics['Weight Difference (Init)'].append(wd_init)
         
@@ -126,12 +124,11 @@ def run_analysis_pipeline(config):
     tasks = data_utils.create_continual_tasks(config, split='train')
     task_names = [t.name for t in tasks]
     
-    # Load Init Weights
     init_weights_path = os.path.join(config.reps_dir, "init_weights.npy")
     if os.path.exists(init_weights_path):
         init_weights = np.load(init_weights_path)
     else:
-        print("Warning: init_weights.npy not found. Weight metrics vs Init will be zero/skipped.")
+        print("Warning: init_weights.npy not found.")
         init_weights = None
 
     history = {
@@ -148,8 +145,6 @@ def run_analysis_pipeline(config):
     
     task_boundaries = []
     total_epochs = 0
-    
-    # Track the weights at the start of the current task
     previous_task_final_weights = None 
     
     for t_name in task_names:
@@ -157,35 +152,26 @@ def run_analysis_pipeline(config):
         w_path = os.path.join(config.reps_dir, f"{t_name}_weights_per_epoch.npy")
         
         if not os.path.exists(rep_path) or not os.path.exists(w_path):
-            print(f"Warning: Data files not found for {t_name}. Skipping.")
             continue
             
         print(f"Processing {t_name}...")
-        
-        # Load Data
-        rep_data = np.load(rep_path)   # (epochs, repeats, samples, dim)
-        w_data = np.load(w_path)       # (epochs, repeats, total_params)
+        rep_data = np.load(rep_path)   
+        w_data = np.load(w_path)       
         n_epochs = rep_data.shape[0]
         
-        # --- Determine Reference Weights for this Task ---
         if previous_task_final_weights is None:
-             # Task 1: Start of task reference is Random Init
              if init_weights is not None:
                  start_of_task_weights = init_weights
              else:
-                 # Fallback if init file missing (should not happen with updated main)
                  start_of_task_weights = w_data[0] 
         else:
-             # Task > 1: Start of task reference is End of Previous Task
              start_of_task_weights = previous_task_final_weights
 
         for epoch_idx in range(n_epochs):
-            # 1. Compute Representation Metrics
             rep_step_metrics = compute_rep_metrics(rep_data[epoch_idx])
             for key, val in rep_step_metrics.items():
                 history[key].append(val)
                 
-            # 2. Compute Weight Metrics
             if init_weights is not None:
                 w_step_metrics = compute_weight_metrics(
                     w_data[epoch_idx], 
@@ -195,9 +181,7 @@ def run_analysis_pipeline(config):
                 for key, val in w_step_metrics.items():
                     history[key].append(val)
                 
-        # Update reference for next task (last epoch of current task)
         previous_task_final_weights = w_data[-1]
-        
         total_epochs += n_epochs
         task_boundaries.append(total_epochs)
 
@@ -206,7 +190,7 @@ def run_analysis_pipeline(config):
         if len(history[key]) > 0:
             history[key] = np.stack(history[key]) 
 
-    # Plotting
+    # Plotting using NanMean / NanStd
     metric_names = list(history.keys())
     metric_names = [m for m in metric_names if len(history[m]) > 0]
     n_metrics = len(metric_names)
@@ -222,33 +206,22 @@ def run_analysis_pipeline(config):
         ax = axes[i]
         data = history[metric] 
         
-        mean = np.mean(data, axis=1)
-        std = np.std(data, axis=1)
+        # USE NANMEAN / NANSTD here
+        mean = np.nanmean(data, axis=1)
+        std = np.nanstd(data, axis=1)
         
         ax.plot(x_axis, mean, label='Mean', color='blue', linewidth=2)
         ax.fill_between(x_axis, mean - std, mean + std, color='blue', alpha=0.2, label='Std Dev')
         
         ax.set_ylabel(metric)
-        
-        # Add Task Boundaries
         for boundary in task_boundaries[:-1]:
             ax.axvline(x=boundary, color='red', linestyle='--', alpha=0.6)
             
         if i == 0:
-            ax.set_title(f"Plasticine Metrics Analysis ({config.dataset_name})")
-            from matplotlib.lines import Line2D
-            custom_lines = [Line2D([0], [0], color='blue', lw=2),
-                            Line2D([0], [0], color='red', linestyle='--')]
-            ax.legend(custom_lines, ['Metric (Mean ± Std)', 'Task Boundary'], loc='upper right')
+            ax.set_title(f"Plasticine Metrics Analysis ({config.dataset_name}) - ES={config.early_stopping}")
 
     axes[-1].set_xlabel('Epochs (Continual)')
-    
     plt.tight_layout()
-    save_path = os.path.join(config.figures_dir, f"plasticine_metrics_{config.dataset_name}.png")
+    save_path = os.path.join(config.figures_dir, f"plasticine_metrics_{config.dataset_name}_ES.png")
     plt.savefig(save_path)
     print(f"Analysis plots saved to {save_path}")
-
-if __name__ == "__main__":
-    config = config_module.get_config()
-    os.makedirs(config.figures_dir, exist_ok=True)
-    run_analysis_pipeline(config)

@@ -2,7 +2,6 @@ import jax
 import jax.numpy as jnp
 import optax
 import numpy as np
-import tensorflow_datasets as tfds
 from functools import partial
 from jax import flatten_util
 from state import create_vectorized_state
@@ -17,29 +16,35 @@ class ContinualLearner:
         rng = jax.random.key(config.seed)
         self.state = create_vectorized_state(config, rng)
         
-        # Create a flatten function based on the model structure
-        # We grab a single instance's params to define the structure
         self._flat_fn = lambda p: flatten_util.ravel_pytree(p)[0]
 
-    def preload_data(self, tfds_dataset):
-        """Converts TFDS to JAX-ready numpy arrays."""
-        ds_numpy = tfds.as_numpy(tfds_dataset)
-        images, labels = [], []
-        for batch in ds_numpy:
-            images.append(batch[0])
-            labels.append(batch[1])
+    def preload_data(self, data_loader):
+        """
+        Converts a PyTorch DataLoader (yielding Tensors) into JAX-ready numpy arrays.
+        Reads the entire dataset into memory (RAM).
+        """
+        images_list = []
+        labels_list = []
         
-        images = np.stack(images)
-        labels = np.stack(labels)
-        if labels.ndim == 2: labels = labels[..., None]
+        # Iterate over the PyTorch DataLoader
+        for batch_imgs, batch_lbls in data_loader:
+            images_list.append(batch_imgs.numpy())
+            labels_list.append(batch_lbls.numpy())
+            
+        if not images_list:
+            raise ValueError("DataLoader returned no data.")
+
+        # Concatenate all batches
+        images = np.concatenate(images_list, axis=0)
+        labels = np.concatenate(labels_list, axis=0)
+        
+        # Ensure labels have the shape (N, 1) if they are (N,)
+        if labels.ndim == 1: 
+            labels = labels[..., None]
+            
         return jnp.array(images), jnp.array(labels)
 
     def get_flat_params(self, state):
-        """
-        Flattens parameters for all seeds.
-        Returns: (n_repeats, total_param_count)
-        """
-        # We use vmap to flatten each seed's parameters independently
         return jax.vmap(self._flat_fn)(state.params)
 
     # --- JIT Compiled Core Logic ---
@@ -72,15 +77,15 @@ class ContinualLearner:
 
     @partial(jax.jit, static_argnums=(0,))
     def _eval_jit(self, state, images, labels):
-        n_batches, b_size = images.shape[0], images.shape[1]
-        flat_img = images.reshape(n_batches * b_size, -1)
-        flat_lbl = labels.reshape(n_batches * b_size, -1)
-
+        # We might have variable batch sizes at test time, but JAX expects fixed shapes in JIT.
+        # However, if 'images' is passed as one giant array (Full Batch), vmap handles the 'seeds'.
+        # We assume images is (N, Dim), labels (N, 1).
+        
         def eval_single(curr_state):
-            logits = curr_state.apply_fn({'params': curr_state.params}, flat_img)
-            loss = optax.sigmoid_binary_cross_entropy(logits, flat_lbl).mean()
+            logits = curr_state.apply_fn({'params': curr_state.params}, images)
+            loss = optax.sigmoid_binary_cross_entropy(logits, labels).mean()
             preds = (logits > 0).astype(jnp.float32)
-            acc = jnp.mean(preds == flat_lbl)
+            acc = jnp.mean(preds == labels)
             return loss, acc
 
         return jax.vmap(eval_single)(state)
@@ -88,10 +93,6 @@ class ContinualLearner:
     # === Feature Extraction JIT ===
     @partial(jax.jit, static_argnums=(0,))
     def _extract_features_jit(self, state, images):
-        """
-        Extracts hidden representations for all seeds.
-        Output Shape: (n_repeats, n_images, hidden_dim)
-        """
         if images.ndim == 4: 
              images = images.reshape(-1, images.shape[-1])
         
@@ -108,39 +109,46 @@ class ContinualLearner:
     # --- High Level Loop ---
 
     def train_task(self, task, test_streams, global_history, analysis_subset=None):
-        """
-        Returns:
-            representation_history: List of arrays (epochs, repeats, samples, hidden)
-            weight_history: List of arrays (epochs, repeats, total_params)
-        """
         print(f"--- CL Training on {task.name} (x{self.config.n_repeats} Repeats) ---")
         
         for h in self.hooks: h.on_task_start(task, self.state)
 
-        train_ds = task.load_data()
-        train_imgs, train_lbls = self.preload_data(train_ds)
+        # Use new logic to load from Torch DataLoader -> Numpy/Jax
+        train_loader = task.load_data()
+        train_imgs, train_lbls = self.preload_data(train_loader)
         
         analysis_imgs = None
         representation_history = [] 
-        weight_history = [] # Store weights
+        weight_history = []
 
         if analysis_subset:
+            # analysis_subset is now a DataLoader
             print(f"    > Preloading analysis subset for representation tracking...")
             analysis_imgs, _ = self.preload_data(analysis_subset)
             if analysis_imgs.ndim > 2:
                 analysis_imgs = analysis_imgs.reshape(-1, analysis_imgs.shape[-1])
 
+        # Cache test data (Test streams are DataLoaders now)
         if not hasattr(self, 'cached_test_data'):
             self.cached_test_data = {}
-            for t_name, t_ds in test_streams.items():
-                self.cached_test_data[t_name] = self.preload_data(t_ds)
+            for t_name, t_loader in test_streams.items():
+                self.cached_test_data[t_name] = self.preload_data(t_loader)
+
+        # Batching for JAX scan
+        # train_imgs is (TotalSamples, Dim). We need to reshape for JAX scan: (NumBatches, BatchSize, Dim)
+        n_samples = train_imgs.shape[0]
+        # Drop remainder logic was handled in Torch DataLoader, so n_samples should be divisible by batch_size
+        n_batches = n_samples // self.config.batch_size
+        
+        train_imgs_reshaped = train_imgs[:n_batches*self.config.batch_size].reshape(n_batches, self.config.batch_size, -1)
+        train_lbls_reshaped = train_lbls[:n_batches*self.config.batch_size].reshape(n_batches, self.config.batch_size, -1)
 
         for epoch in range(self.config.epochs_per_task):
             for h in self.hooks: h.on_epoch_start(epoch, self.state)
 
             # 1. TRAIN
             self.state, epoch_losses, epoch_accs = self._train_epoch_jit(
-                self.state, train_imgs, train_lbls
+                self.state, train_imgs_reshaped, train_lbls_reshaped
             )
             
             global_history['train_loss_mean'].append(np.mean(epoch_losses))
@@ -149,26 +157,39 @@ class ContinualLearner:
             global_history['train_acc_std'].append(np.std(epoch_accs))
 
             # 2. EVAL
-            for t_name, (t_imgs, t_lbls) in self.cached_test_data.items():
-                t_loss, t_acc = self._eval_jit(self.state, t_imgs, t_lbls)
-                global_history['test_metrics'][t_name]['acc_mean'].append(np.mean(t_acc))
-                global_history['test_metrics'][t_name]['acc_std'].append(np.std(t_acc))
-                global_history['test_metrics'][t_name]['loss_mean'].append(np.mean(t_loss))
+            # Logic Update: Always append to history. If skipping eval, append NaNs.
+            # This ensures the history length matches the total epochs for plotting.
+            if epoch % self.config.eval_freq == 0 or epoch == self.config.epochs_per_task - 1:
+                for t_name, (t_imgs, t_lbls) in self.cached_test_data.items():
+                    t_loss, t_acc = self._eval_jit(self.state, t_imgs, t_lbls)
+                    global_history['test_metrics'][t_name]['acc_mean'].append(np.mean(t_acc))
+                    global_history['test_metrics'][t_name]['acc_std'].append(np.std(t_acc))
+                    global_history['test_metrics'][t_name]['loss_mean'].append(np.mean(t_loss))
+                    global_history['test_metrics'][t_name]['loss_std'].append(np.std(t_loss))
+                    
+                    if t_name == task.name and epoch == self.config.epochs_per_task - 1:
+                        print(f"    > Epoch {epoch+1} | {t_name} Acc: {np.mean(t_acc):.4f} ± {np.std(t_acc):.4f}")
+            else:
+                # NaN padding for alignment
+                for t_name in self.cached_test_data.keys():
+                    global_history['test_metrics'][t_name]['acc_mean'].append(np.nan)
+                    global_history['test_metrics'][t_name]['acc_std'].append(np.nan)
+                    global_history['test_metrics'][t_name]['loss_mean'].append(np.nan)
+                    global_history['test_metrics'][t_name]['loss_std'].append(np.nan)
                 
-                if t_name == task.name and epoch == self.config.epochs_per_task - 1:
-                     print(f"    > Epoch {epoch+1} | {t_name} Acc: {np.mean(t_acc):.4f} ± {np.std(t_acc):.4f}")
-            
-            # 3. CAPTURE DATA (Reps + Weights)
-            # Capture Weights
+            # 3. CAPTURE DATA
             flat_w_gpu = self.get_flat_params(self.state)
-            weight_history.append(np.array(flat_w_gpu)) # Transfer to CPU
+            weight_history.append(flat_w_gpu)
 
             if analysis_imgs is not None:
                 reps_gpu = self._extract_features_jit(self.state, analysis_imgs)
-                representation_history.append(np.array(reps_gpu))
+                representation_history.append(reps_gpu)
 
             for h in self.hooks: h.on_epoch_end(epoch, self.state, metrics=None)
 
         for h in self.hooks: h.on_task_end(task, self.state, metrics=None)
+        weight_history = np.array(jax.device_get(weight_history))
+        if analysis_imgs is not None:
+            representation_history = np.array(jax.device_get(representation_history))
         
         return representation_history, weight_history

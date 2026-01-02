@@ -1,10 +1,11 @@
-import tensorflow as tf
-import tensorflow_datasets as tfds
+import torch
+from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset
+from torchvision import datasets, transforms
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
 # --- Dataset Metadata ---
-# Note: input_dim here refers to the ORIGINAL raw dimensions.
 DATASET_CONFIGS = {
     'mnist': {'input_dim': 784, 'num_classes': 10, 'channels': 1},
     'kmnist': {'input_dim': 784, 'num_classes': 10, 'channels': 1},
@@ -12,13 +13,16 @@ DATASET_CONFIGS = {
     'cifar100': {'input_dim': 3072, 'num_classes': 100, 'channels': 3},
 }
 
+DATASET_CLASS_MAP = {
+    'mnist': datasets.MNIST,
+    'kmnist': datasets.KMNIST,
+    'fashion_mnist': datasets.FashionMNIST,
+    'cifar100': datasets.CIFAR100
+}
+
 def get_dataset_dims(dataset_name, downsample_shape=None):
-    """
-    Returns the flattened input dimension. 
-    If downsample_shape is provided (tuple of height, width), calculates dim dynamically.
-    """
     if dataset_name not in DATASET_CONFIGS:
-        raise ValueError(f"Dataset {dataset_name} not supported. Choose from {list(DATASET_CONFIGS.keys())}")
+        raise ValueError(f"Dataset {dataset_name} not supported.")
     
     meta = DATASET_CONFIGS[dataset_name]
     
@@ -29,99 +33,125 @@ def get_dataset_dims(dataset_name, downsample_shape=None):
     
     return meta['input_dim']
 
+class FilteredMappedDataset(Dataset):
+    """
+    Wraps a standard torchvision dataset.
+    1. Filters for a specific 'original_label'.
+    2. Remaps that label to 'binary_label'.
+    3. Applies transforms (Resize, Normalize, Flatten).
+    """
+    def __init__(self, dataset_cls, root, train, original_label, binary_label, img_size=None):
+        # Load the base dataset (download if needed)
+        self.base_dataset = dataset_cls(root=root, train=train, download=True, transform=None)
+        
+        # Find indices matching the original label
+        # targets is usually a tensor or list in torchvision datasets
+        targets = np.array(self.base_dataset.targets)
+        self.indices = np.where(targets == original_label)[0]
+        
+        self.binary_label = torch.tensor(binary_label, dtype=torch.float32)
+        
+        # Define Transforms
+        transform_list = [transforms.ToTensor()] # Converts [0,255] -> [0.0, 1.0]
+        
+        # Downsample if requested
+        if img_size is not None:
+            transform_list.insert(0, transforms.Resize((img_size, img_size)))
+            
+        self.transform = transforms.Compose(transform_list)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        # Get real index
+        real_idx = self.indices[idx]
+        img, _ = self.base_dataset[real_idx]
+        
+        # Apply transforms
+        img = self.transform(img)
+        
+        # Flatten: (C, H, W) -> (C*H*W)
+        img = torch.flatten(img)
+        
+        return img.numpy(), self.binary_label.numpy()
+
 class CLTask:
     def __init__(self, task_id, name, class_definitions, split='train', 
                  batch_size=128, seed=42, data_dir="./data", img_size=None):
-        """
-        img_size: tuple (height, width) or None. If provided, images are resized to this dimension.
-        """
         self.task_id = task_id
         self.name = name
         self.class_definitions = class_definitions
-        self.split = split
+        self.is_train = (split == 'train')
         self.batch_size = batch_size
         self.seed = seed
         self.data_dir = data_dir
         self.img_size = img_size 
 
-    def _load_single_source(self, dataset_name, original_label, binary_label):
-        # Load dataset. as_supervised=True returns (image, label)
-        ds = tfds.load(dataset_name, split=self.split, data_dir=self.data_dir, as_supervised=True, shuffle_files=False)
-        
-        def filter_fn(image, label):
-            return label == original_label
-        
-        def map_fn(image, label):
-            # Normalize to 0-1
-            image = tf.cast(image, tf.float32) / 255.0
-            
-            # Downsample if configuration requests it
-            if self.img_size is not None:
-                # Resize expects [height, width]
-                image = tf.image.resize(image, [self.img_size, self.img_size])
-            
-            # Flatten dynamically
-            image = tf.reshape(image, [-1])
-            new_label = tf.constant(binary_label, dtype=tf.float32)
-            return image, new_label
-
-        ds = ds.filter(filter_fn)
-        ds = ds.map(map_fn, num_parallel_calls=tf.data.AUTOTUNE)
-        return ds
+    def _get_single_dataset(self, def_dict):
+        d_name = def_dict['dataset']
+        if d_name not in DATASET_CLASS_MAP:
+             raise ValueError(f"Unknown dataset {d_name}")
+             
+        ds_cls = DATASET_CLASS_MAP[d_name]
+        return FilteredMappedDataset(
+            dataset_cls=ds_cls,
+            root=self.data_dir,
+            train=self.is_train,
+            original_label=def_dict['original_label'],
+            binary_label=def_dict['binary_label'],
+            img_size=self.img_size
+        )
 
     def load_data(self):
-        datasets = []
-        for comp in self.class_definitions:
-            ds = self._load_single_source(comp['dataset'], comp['original_label'], comp['binary_label'])
-            datasets.append(ds)
-            
-        full_ds = datasets[0]
-        for next_ds in datasets[1:]:
-            full_ds = full_ds.concatenate(next_ds)
-            
-        if self.split == 'train':
-            full_ds = full_ds.shuffle(2048, seed=self.seed)
-            
-        full_ds = full_ds.batch(self.batch_size, drop_remainder=True)
-        full_ds = full_ds.prefetch(tf.data.AUTOTUNE)
-        return full_ds
+        """Returns a PyTorch DataLoader."""
+        datasets_list = [self._get_single_dataset(d) for d in self.class_definitions]
+        full_ds = ConcatDataset(datasets_list)
+        
+        # If training, shuffle. If testing, usually don't need shuffle, but good for randomness.
+        shuffle = self.is_train
+        
+        # Determine generator for reproducibility
+        g = torch.Generator()
+        g.manual_seed(self.seed)
+        
+        loader = DataLoader(
+            full_ds, 
+            batch_size=self.batch_size, 
+            shuffle=shuffle, 
+            drop_last=True, # Matches original TF drop_remainder=True
+            generator=g,
+            num_workers=0 # Increase if CPU bound, keep 0 for safety/debugging
+        )
+        return loader
     
     def load_mandi_subset(self, samples_per_class):
         """
-        Loads exactly samples_per_class for each class definition in this task.
-        Returns a single unbatched dataset of size (2 * samples_per_class).
+        Returns a single DataLoader containing exactly samples_per_class items.
         """
-        datasets = []
-        for comp in self.class_definitions:
-            ds = self._load_single_source(comp['dataset'], comp['original_label'], comp['binary_label'])
-            ds = ds.take(samples_per_class)
-            datasets.append(ds)
+        datasets_list = []
+        for d in self.class_definitions:
+            full_sub_ds = self._get_single_dataset(d)
+            # Take first N samples (no shuffle here ensures consistency if indices are stable)
+            # To be safe, we rely on the order in FilteredMappedDataset.indices
+            indices = range(min(len(full_sub_ds), samples_per_class))
+            small_ds = Subset(full_sub_ds, indices)
+            datasets_list.append(small_ds)
 
-        full_ds = datasets[0]
-        for next_ds in datasets[1:]:
-            full_ds = full_ds.concatenate(next_ds)
+        full_ds = ConcatDataset(datasets_list)
+        total_samples = len(full_ds)
         
-        total_samples = samples_per_class * len(datasets)
-        full_ds = full_ds.batch(total_samples)
-        return full_ds
-    
+        loader = DataLoader(full_ds, batch_size=total_samples, shuffle=False)
+        return loader
 
 def create_continual_tasks(config, split='train'):
-    """
-    Generates a list of CLTask objects based on the config.dataset_name.
-    Expects config to potentially have 'downsample_dim' (tuple or list).
-    """
     tasks = []
     dataset_name = config.dataset_name
     total_classes = DATASET_CONFIGS[dataset_name]['num_classes']
-    
-    # Check for downsampling in config
     img_size = getattr(config, 'downsample_dim', None)
     
-    # Validation
     if config.num_tasks * 2 > total_classes:
-        raise ValueError(f"Too many tasks requested ({config.num_tasks}) for dataset {dataset_name} "
-                         f"which has {total_classes} classes.")
+        raise ValueError(f"Too many tasks ({config.num_tasks}) for dataset {dataset_name}.")
 
     for i in range(config.num_tasks):
         idx_0 = (i * 2) % total_classes
@@ -142,40 +172,34 @@ def create_continual_tasks(config, split='train'):
             batch_size=config.batch_size, 
             seed=config.seed, 
             data_dir=config.data_dir,
-            img_size=img_size  # Pass the resize param
+            img_size=img_size
         )
         tasks.append(task)
         
     return tasks
 
-
 def save_task_samples_grid(tasks, config, output_file="task_samples_grid.png"):
-    """
-    Generates a grid of example images. Handles resized/downsampled images dynamically.
-    """
     num_tasks = len(tasks)
     fig, axes = plt.subplots(num_tasks, 2, figsize=(6, 3 * num_tasks))
-    
-    if num_tasks == 1:
-        axes = axes.reshape(1, -1)
+    if num_tasks == 1: axes = axes.reshape(1, -1)
 
     print(f"\nGenerating sample grid for {num_tasks} tasks...")
-
-    # Determine channel count for reshaping logic
     channels = DATASET_CONFIGS[config.dataset_name].get('channels', 1)
 
     for i, task in enumerate(tasks):
-        subset_ds = task.load_mandi_subset(samples_per_class=1)
-        ds_numpy = tfds.as_numpy(subset_ds)
-        batch_images, batch_labels = next(iter(ds_numpy))
+        loader = task.load_mandi_subset(samples_per_class=1)
+        # Get single batch (which is the whole subset)
+        batch_images, batch_labels = next(iter(loader))
+        
+        # batch_images is a Tensor (B, FlatDim)
+        batch_images = batch_images.numpy()
+        batch_labels = batch_labels.numpy()
         
         for binary_label in [0, 1]:
             ax = axes[i, binary_label]
-            idx = np.where(batch_labels.flatten() == binary_label)[0][0]
+            idx = np.where(batch_labels == binary_label)[0][0]
             flat_img = batch_images[idx]
             
-            # Dynamic Reshaping Logic
-            # Calculate side length: sqrt(flat_size / channels)
             flat_len = flat_img.shape[0]
             side = int(np.sqrt(flat_len // channels))
             
@@ -184,11 +208,17 @@ def save_task_samples_grid(tasks, config, output_file="task_samples_grid.png"):
                 cmap = 'gray'
             else:
                 img = flat_img.reshape(side, side, channels)
+                # If PyTorch loaded as CHW, but we flattened, reshaping to HWC for matplotlib might need care.
+                # Standard Flatten was (C,H,W) -> contiguous.
+                # If channels=3, flattened is RRR...GGG...BBB...
+                # We need to reshape (3, H, W) then transpose to (H, W, 3)
+                img_chw = flat_img.reshape(channels, side, side)
+                img = np.moveaxis(img_chw, 0, -1)
                 cmap = None
 
             ax.imshow(img, cmap=cmap)
             orig_label = task.class_definitions[binary_label]['original_label']
-            ax.set_title(f"Task {task.task_id} | Label {binary_label}\n(Original: {orig_label})", fontsize=10)
+            ax.set_title(f"T{task.task_id} | L{binary_label} (Orig: {orig_label})", fontsize=10)
             ax.axis('off')
 
     plt.tight_layout()

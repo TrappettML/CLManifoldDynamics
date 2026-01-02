@@ -13,8 +13,8 @@ def generate_xor_data(n_per_cloud: int, noise: float) -> Tuple[np.ndarray, np.nd
     Class 1: (+1,-1), (-1,+1)
     """
     means = np.array([
-        [1, 1], [-1, -1],  # Class 0
-        [1, -1], [-1, 1]   # Class 1
+        [2, 2], [-2, -2],  # Class 0
+        [2, -2], [-2, 2]   # Class 1
     ])
     
     X_list = []
