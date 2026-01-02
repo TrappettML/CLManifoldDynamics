@@ -10,7 +10,7 @@ DATASET_CONFIGS = {
     'mnist': {'input_dim': 784, 'num_classes': 10, 'channels': 1},
     'kmnist': {'input_dim': 784, 'num_classes': 10, 'channels': 1},
     'fashion_mnist': {'input_dim': 784, 'num_classes': 10, 'channels': 1},
-    'cifar100': {'input_dim': 3072, 'num_classes': 100, 'channels': 3},
+    'cifar100': {'input_dim': 3072, 'num_classes': 100, 'channels': 1},
 }
 
 DATASET_CLASS_MAP = {
@@ -54,6 +54,7 @@ class FilteredMappedDataset(Dataset):
         # Define Transforms
         transform_list = [transforms.ToTensor()] # Converts [0,255] -> [0.0, 1.0]
         
+        transform_list.insert(0, transforms.Grayscale(num_output_channels=1))
         # Downsample if requested
         if img_size is not None:
             transform_list.insert(0, transforms.Resize((img_size, img_size)))

@@ -12,6 +12,9 @@ import expert_trainer
 from hooks import CLHook
 import analysis
 
+# Add this to suppress the internal torchvision warning
+warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
+
 class LoggerHook(CLHook):
     def on_task_start(self, task, state):
         print(f"[Hook] Starting Task ID {task.task_id}")
