@@ -11,6 +11,7 @@ from learner import ContinualLearner
 import expert_trainer
 from hooks import CLHook
 import analysis
+import cl_metrics  
 
 
 class LoggerHook(CLHook):
@@ -77,10 +78,22 @@ def main():
 
     # 4. Expert Baselines
     expert_stats = {} 
+    expert_histories = {} 
+    
     print("\n--- Computing Expert Baselines ---")
     for task in train_tasks:
-        l_mean, l_std, a_mean, a_std, exp_l, exp_acc = expert_trainer.train_single_expert(config, task, test_streams[task.name])
+        # expert_trainer returns: loss_mean, loss_std, acc_mean, acc_std, te_l, te_a
+        # te_l and te_a are shape (Epochs, Repeats)
+        _, _, _, _, exp_l, exp_acc = expert_trainer.train_single_expert(
+            config, task, test_streams[task.name]
+        )
         
+        # Store raw histories for CL metrics
+        expert_histories[task.name] = {
+            'loss': exp_l,
+            'acc': exp_acc
+        }
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             stats = {
@@ -89,6 +102,11 @@ def main():
             }
         expert_stats[task.name] = stats
 
+    # 4a. CL metrics
+    cl_metrics = cl_metrics.compute_and_log_cl_metrics(
+        global_history, expert_histories, config, metric_type='acc'
+    )
+    print(f"{cl_metrics}")
     # 5. Plotting
     print("\nGenerating Plots...")
     
