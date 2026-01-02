@@ -19,6 +19,9 @@ def train_single_expert(config, train_task, test_ds):
     # 2. Reshape for Batching
     n_samples = train_imgs.shape[0]
     n_batches = n_samples // config.batch_size
+    if n_batches == 0:
+        raise ValueError("Data too small for batch size")
+        
     train_imgs = train_imgs[:n_batches*config.batch_size]
     train_lbls = train_lbls[:n_batches*config.batch_size]
     
@@ -33,14 +36,10 @@ def train_single_expert(config, train_task, test_ds):
             curr_state = carry
             
             # A. Train Step (Always runs)
+            # Returns means over batches: shape (n_repeats,)
             new_state, train_losses, train_accs = learner._train_epoch_jit(curr_state, t_imgs, t_lbls)
             
             # B. Conditional Eval Step
-            # We want to eval if (epoch_idx % eval_freq == 0) OR (epoch_idx == last_epoch)
-            # Since 'scan' needs fixed shapes, we compute both branches but only execute one.
-            # However, _eval_jit is expensive, so we want to avoid executing it if not needed.
-            # jax.lax.cond executes ONLY the true branch.
-            
             is_eval_step = (epoch_idx % config.eval_freq == 0) | (epoch_idx == config.epochs_per_task - 1)
             
             def true_eval_fn(s):
@@ -49,11 +48,9 @@ def train_single_expert(config, train_task, test_ds):
                 return l, a
 
             def false_eval_fn(s):
-                # Returns NaNs of same shape as eval
-                # Shape of eval is (n_repeats,). We need to match that.
-                # s.params is a Pytree, we can get n_repeats from it or hardcode if known.
-                # Safer to rely on the shape of train_losses which is (n_repeats,)
-                dummy_shape = train_losses.shape
+                # Returns NaNs of same shape as eval -> (n_repeats,)
+                # We use train_losses shape to determine n_repeats
+                dummy_shape = train_losses.shape 
                 return jnp.full(dummy_shape, jnp.nan), jnp.full(dummy_shape, jnp.nan)
 
             test_losses, test_accs = jax.lax.cond(
@@ -64,7 +61,6 @@ def train_single_expert(config, train_task, test_ds):
             )
 
             # Return state and (Train Metrics, Test Metrics)
-            # We pack metrics into a tuple to match scan structure
             metrics = (train_losses, train_accs, test_losses, test_accs)
             return new_state, metrics
 
@@ -96,7 +92,7 @@ def train_single_expert(config, train_task, test_ds):
     te_l = np.array(te_l)   # (Epochs, Repeats) - contains NaNs
     te_a = np.array(te_a)
 
-    # For the "Final" stats, we can grab the last row since we forced eval on the last epoch
+    # Calculate final stats (last row is forced eval)
     final_losses = te_l[-1]
     final_accs = te_a[-1]
     

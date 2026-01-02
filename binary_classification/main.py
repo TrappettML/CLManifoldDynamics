@@ -4,6 +4,7 @@ os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 import jax
 import matplotlib.pyplot as plt
 import numpy as np
+import warnings
 import data_utils
 import config as config_module
 from learner import ContinualLearner
@@ -41,10 +42,9 @@ def main():
     np.save(f"{config.reps_dir}/init_weights.npy", np.array(init_weights))
     
     global_history = {
-        'train_acc_mean': [], 'train_acc_std': [],
-        'train_loss_mean': [], 'train_loss_std': [],
+        'train_acc': [], 'train_loss': [],
         'test_metrics': {
-            name: {'acc_mean': [], 'acc_std': [], 'loss_mean': [], 'loss_std': []} 
+            name: {'acc': [], 'loss': []} 
             for name in test_streams.keys()
         }
     }
@@ -54,10 +54,8 @@ def main():
 
     # 3. CL Loop
     for task in train_tasks:
-        # Load analysis subset (returns DataLoader)
         analysis_ds = task.load_mandi_subset(samples_per_class=config.mandi_samples)
         
-        # Preload to extract labels for saving
         _, subset_lbls = learner.preload_data(analysis_ds)
         np.save(f"{config.reps_dir}/{task.name}_labels.npy", subset_lbls)
 
@@ -79,67 +77,107 @@ def main():
     expert_stats = {} 
     print("\n--- Computing Expert Baselines ---")
     for task in train_tasks:
-        # expert_trainer calls learner.preload_data, which now handles the DataLoader from test_streams
         l_mean, l_std, a_mean, a_std, exp_l, exp_acc = expert_trainer.train_single_expert(config, task, test_streams[task.name])
-        stats = {
-            'loss_mean': np.mean(exp_l, axis=1),
-            'loss_std': np.std(exp_l, axis=1),
-            'acc_mean': np.mean(exp_acc, axis=1),
-            'acc_std': np.std(exp_acc, axis=1)
-        }
+        
+        # Suppress "Mean of empty slice" warnings for epochs with no eval
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            stats = {
+                'loss_mean': np.nanmean(exp_l, axis=1),
+                'loss_std': np.nanstd(exp_l, axis=1),
+                'acc_mean': np.nanmean(exp_acc, axis=1),
+                'acc_std': np.nanstd(exp_acc, axis=1)
+            }
         expert_stats[task.name] = stats
 
-    # 5. Plotting (Same as before)
+    # 5. Plotting
     print("\nGenerating Plots...")
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12), sharex=True)
-    epochs_range = range(1, total_epochs + 1)
+    
+    # Use array for boolean indexing
+    epochs_range = np.arange(1, total_epochs + 1)
     
     task_names = [t.name for t in train_tasks]
     colormap = plt.cm.jet(np.linspace(0, 1, len(task_names)))
     color_dict = {name: color for name, color in zip(task_names, colormap)}
 
-    # Accuracies
-    train_mean = np.array(global_history['train_acc_mean'])
-    train_std = np.array(global_history['train_acc_std'])
+    # --- AGGREGATE METRICS ---
+    train_acc_raw = np.array(global_history['train_acc'])
+    train_loss_raw = np.array(global_history['train_loss'])
+    
+    # Train stats are dense (no NaNs)
+    train_mean = np.mean(train_acc_raw, axis=1)
+    train_std = np.std(train_acc_raw, axis=1)
+    loss_mean = np.mean(train_loss_raw, axis=1)
+
+    # Plot Train Accuracy
     ax1.plot(epochs_range, train_mean, label='Current Train Acc', color='grey', linestyle='--', alpha=0.4)
     ax1.fill_between(epochs_range, train_mean - train_std, train_mean + train_std, color='grey', alpha=0.2)
     
     for t_name in task_names:
         metrics = global_history['test_metrics'][t_name]
         color = color_dict[t_name]
-        mean = np.array(metrics['acc_mean'])
-        std = np.array(metrics['acc_std'])
-        ax1.plot(epochs_range, mean, label=f"{t_name} (CL)", color=color, linewidth=2)
-        ax1.fill_between(epochs_range, mean - std, mean + std, color=color, alpha=0.1)
         
+        acc_raw = np.array(metrics['acc']) 
+        
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            mean = np.nanmean(acc_raw, axis=1)
+            std = np.nanstd(acc_raw, axis=1)
+        
+        # Filter NaNs for plotting so lines are connected
+        mask = ~np.isnan(mean)
+        if mask.any():
+            ax1.plot(epochs_range[mask], mean[mask], label=f"{t_name} (CL)", color=color, linewidth=2)
+            ax1.fill_between(epochs_range[mask], mean[mask] - std[mask], mean[mask] + std[mask], color=color, alpha=0.1)
+        
+        # Expert Baseline
         if t_name in expert_stats:
             estats = expert_stats[t_name]
             task_idx = task_names.index(t_name)
             start_epoch = task_idx * config.epochs_per_task
-            expert_x = range(start_epoch + 1, start_epoch + len(estats['acc_mean']) + 1)
-            ax1.plot(expert_x, estats['acc_mean'], color=color, linestyle=':', linewidth=2.5, alpha=0.8)
-            ax1.scatter(expert_x[-1], estats['acc_mean'][-1], color=color, marker='*', s=60, zorder=5)
+            
+            expert_x = np.arange(start_epoch + 1, start_epoch + len(estats['acc_mean']) + 1)
+            emean = estats['acc_mean']
+            emask = ~np.isnan(emean)
+            
+            if emask.any():
+                ax1.plot(expert_x[emask], emean[emask], color=color, linestyle=':', linewidth=2.5, alpha=0.8)
+                if emask[-1]:
+                    ax1.scatter(expert_x[-1], emean[-1], color=color, marker='*', s=60, zorder=5)
 
     ax1.set_ylabel('Accuracy')
     ax1.set_title(f'{config.dataset_name} Accuracy (Solid=CL, Dotted=Expert)')
     ax1.grid(True, alpha=0.3)
     ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
 
-    # Losses
-    loss_mean = np.array(global_history['train_loss_mean'])
+    # Plot Train Loss
     ax2.plot(epochs_range, loss_mean, label='Current Train Loss', color='grey', linestyle='--', alpha=0.4)
     
     for t_name in task_names:
         metrics = global_history['test_metrics'][t_name]
         color = color_dict[t_name]
-        mean = np.array(metrics['loss_mean'])
-        ax2.plot(epochs_range, mean, label=f"{t_name} (CL)", color=color, linewidth=2)
+        
+        loss_raw = np.array(metrics['loss'])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            mean = np.nanmean(loss_raw, axis=1)
+        
+        mask = ~np.isnan(mean)
+        if mask.any():
+            ax2.plot(epochs_range[mask], mean[mask], label=f"{t_name} (CL)", color=color, linewidth=2)
+        
         if t_name in expert_stats:
             estats = expert_stats[t_name]
             task_idx = task_names.index(t_name)
             start_epoch = task_idx * config.epochs_per_task
-            expert_x = range(start_epoch + 1, start_epoch + len(estats['loss_mean']) + 1)
-            ax2.plot(expert_x, estats['loss_mean'], color=color, linestyle=':', linewidth=2.5, alpha=0.8)
+            expert_x = np.arange(start_epoch + 1, start_epoch + len(estats['loss_mean']) + 1)
+            
+            emean = estats['loss_mean']
+            emask = ~np.isnan(emean)
+            
+            if emask.any():
+                ax2.plot(expert_x[emask], emean[emask], color=color, linestyle=':', linewidth=2.5, alpha=0.8)
     
     ax2.set_ylabel('Loss (BCE)')
     ax2.set_xlabel('Total Epochs')

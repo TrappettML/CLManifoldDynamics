@@ -4,7 +4,7 @@ import data_utils
 def get_config():
     config = ml_collections.ConfigDict()
     
-    config.dataset_name = 'mnist' 
+    config.dataset_name = 'kmnist' 
     config.seed = 42
     config.data_dir = "./data"
     config.figures_dir = "./figures"
