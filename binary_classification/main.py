@@ -12,7 +12,6 @@ import expert_trainer
 from hooks import CLHook
 import analysis
 
-warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
 
 class LoggerHook(CLHook):
     def on_task_start(self, task, state):
@@ -67,12 +66,11 @@ def main():
         
         # Save History (Sparse)
         if rep_history is not None:
-            rep_stack = np.stack(rep_history) 
-            np.save(f"{config.reps_dir}/{task.name}_reps_per_epoch.npy", rep_stack)
+            # rep_history is already a numpy array from learner (tree_mapped)
+            np.save(f"{config.reps_dir}/{task.name}_reps_per_epoch.npy", rep_history)
 
         if w_history is not None:
-            w_stack = np.stack(w_history)
-            np.save(f"{config.reps_dir}/{task.name}_weights_per_epoch.npy", w_stack)
+            np.save(f"{config.reps_dir}/{task.name}_weights_per_epoch.npy", w_history)
         
         total_epochs += config.epochs_per_task
         task_boundaries.append(total_epochs)
@@ -102,9 +100,11 @@ def main():
 
     # Plot Train Accuracy (Dense)
     train_acc_raw = np.array(global_history['train_acc'])
-    # Need to reshape because learner extends list with (Epochs, Repeats)
+    
+    # Handle list extension correctly: global_history is a list of arrays (Repeats,)
+    # np.array() creates (TotalEpochs, Repeats).
     if train_acc_raw.ndim == 1:
-        # If flattened entirely, reshape to (TotalEpochs, Repeats)
+        # Fallback if flattening happened
         train_acc_raw = train_acc_raw.reshape(-1, config.n_repeats)
 
     train_mean = np.mean(train_acc_raw, axis=1)
@@ -142,10 +142,11 @@ def main():
                 ax1.plot(expert_x[emask], emean[emask], color=color, linestyle=':', linewidth=2.5, alpha=0.8)
 
     ax1.set_ylabel('Accuracy')
-    ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    # Move legend inside or adjust bbox to prevent cut-off with tight_layout
+    ax1.legend(loc='upper left', bbox_to_anchor=(1.02, 1), borderaxespad=0.)
     ax1.grid(True, alpha=0.3)
 
-    # Plot Loss (Similar Logic)
+    # Plot Loss
     train_loss_raw = np.array(global_history['train_loss'])
     if train_loss_raw.ndim == 1: train_loss_raw = train_loss_raw.reshape(-1, config.n_repeats)
     loss_mean = np.mean(train_loss_raw, axis=1)
@@ -180,7 +181,9 @@ def main():
         ax1.axvline(x=boundary, color='black', alpha=0.5)
         ax2.axvline(x=boundary, color='black', alpha=0.5)
 
+    # Use constrained_layout or adjust subplots manually to fit external legend
     plt.tight_layout()
+    plt.subplots_adjust(right=0.85) # Make room for legend
     plt.savefig(f'{config.figures_dir}/sl_{config.dataset_name}_{config.num_tasks}_tasks.png')
     print(f"Plots saved.")
     

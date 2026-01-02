@@ -61,7 +61,10 @@ def compute_weight_metrics(current, ref_task, ref_init):
     metrics = {'Weight Magnitude': [], 'Weight Difference (Task)': [], 'Weight Difference (Init)': []}
     
     for r in range(n_repeats):
-        w, w_t, w_i = current[r], ref_task[r], ref_init[r]
+        w = current[r]
+        w_t = ref_task[r] if ref_task is not None else w
+        w_i = ref_init[r] if ref_init is not None else w
+        
         if np.isnan(w).any():
              for k in metrics: metrics[k].append(np.nan)
              continue
@@ -102,19 +105,22 @@ def run_analysis_pipeline(config):
         w_data = np.load(w_path)       # (n_steps, n_repeats, params)
         
         n_steps = rep_data.shape[0]
-        # Calculate how many actual epochs this represents
+        # Calculates ACTUAL epochs spanned by these steps
         epochs_in_task = n_steps * config.log_frequency
 
+        # For Task 1, start weights are init_weights. For Task > 1, prev task end.
         start_of_task_weights = init_weights if previous_task_final_weights is None else previous_task_final_weights
-        if start_of_task_weights is None: start_of_task_weights = w_data[0]
+        
+        # Fallback if init_weights missing
+        if start_of_task_weights is None: 
+            start_of_task_weights = w_data[0]
 
         for i in range(n_steps):
             rep_metrics = compute_rep_metrics(rep_data[i], config.hidden_dim)
             for k, v in rep_metrics.items(): history[k].append(v)
                 
-            if init_weights is not None:
-                w_metrics = compute_weight_metrics(w_data[i], start_of_task_weights, init_weights)
-                for k, v in w_metrics.items(): history[k].append(v)
+            w_metrics = compute_weight_metrics(w_data[i], start_of_task_weights, init_weights)
+            for k, v in w_metrics.items(): history[k].append(v)
                 
         previous_task_final_weights = w_data[-1]
         current_epoch_counter += epochs_in_task

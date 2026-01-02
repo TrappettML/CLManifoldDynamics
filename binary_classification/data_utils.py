@@ -21,17 +21,18 @@ class PatchedCIFAR100(datasets.CIFAR100):
     VisibleDeprecationWarning during data loading.
     """
     def __init__(self, root, train=True, transform=None, target_transform=None, download=False):
-        # Initialize the base class but skip the potentially noisy loading logic 
-        # by passing download=False initially (we handle it manually below)
+        # Initialize base with download=False to control the loading process manually
         super(datasets.CIFAR100, self).__init__(root, transform=transform, 
-                                                target_transform=target_transform)
+                                                target_transform=target_transform, download=False)
         
         self.train = train
+        
+        # FIX: Download MUST happen before integrity check
         if download:
             self.download()
 
         if not self._check_integrity():
-            raise RuntimeError('Dataset not found or corrupted.')
+            raise RuntimeError('Dataset not found or corrupted. You can use download=True to download it')
 
         if self.train:
             downloaded_list = self.train_list
@@ -63,7 +64,7 @@ DATASET_CLASS_MAP = {
     'mnist': datasets.MNIST,
     'kmnist': datasets.KMNIST,
     'fashion_mnist': datasets.FashionMNIST,
-    'cifar100': PatchedCIFAR100  # Updated to use the patched class
+    'cifar100': PatchedCIFAR100
 }
 
 def get_dataset_dims(dataset_name, downsample_shape=None):
@@ -91,7 +92,6 @@ class FilteredMappedDataset(Dataset):
         self.base_dataset = dataset_cls(root=root, train=train, download=True, transform=None)
         
         # Find indices matching the original label
-        # targets is usually a tensor or list in torchvision datasets
         targets = np.array(self.base_dataset.targets)
         self.indices = np.where(targets == original_label)[0]
         
@@ -100,7 +100,9 @@ class FilteredMappedDataset(Dataset):
         # Define Transforms
         transform_list = [transforms.ToTensor()] # Converts [0,255] -> [0.0, 1.0]
         
+        # Add Grayscale to ensure 1 channel if input is PIL (FashionMNIST default)
         transform_list.insert(0, transforms.Grayscale(num_output_channels=1))
+        
         # Downsample if requested
         if img_size is not None:
             transform_list.insert(0, transforms.Resize((img_size, img_size)))
@@ -111,14 +113,10 @@ class FilteredMappedDataset(Dataset):
         return len(self.indices)
 
     def __getitem__(self, idx):
-        # Get real index
         real_idx = self.indices[idx]
         img, _ = self.base_dataset[real_idx]
         
-        # Apply transforms
         img = self.transform(img)
-        
-        # Flatten: (C, H, W) -> (C*H*W)
         img = torch.flatten(img)
         
         return img.numpy(), self.binary_label.numpy()
@@ -155,10 +153,8 @@ class CLTask:
         datasets_list = [self._get_single_dataset(d) for d in self.class_definitions]
         full_ds = ConcatDataset(datasets_list)
         
-        # If training, shuffle. If testing, usually don't need shuffle, but good for randomness.
         shuffle = self.is_train
         
-        # Determine generator for reproducibility
         g = torch.Generator()
         g.manual_seed(self.seed)
         
@@ -166,21 +162,16 @@ class CLTask:
             full_ds, 
             batch_size=self.batch_size, 
             shuffle=shuffle, 
-            drop_last=True, # Matches original TF drop_remainder=True
+            drop_last=True, 
             generator=g,
-            num_workers=0 # Increase if CPU bound, keep 0 for safety/debugging
+            num_workers=0 
         )
         return loader
     
     def load_mandi_subset(self, samples_per_class):
-        """
-        Returns a single DataLoader containing exactly samples_per_class items.
-        """
         datasets_list = []
         for d in self.class_definitions:
             full_sub_ds = self._get_single_dataset(d)
-            # Take first N samples (no shuffle here ensures consistency if indices are stable)
-            # To be safe, we rely on the order in FilteredMappedDataset.indices
             indices = range(min(len(full_sub_ds), samples_per_class))
             small_ds = Subset(full_sub_ds, indices)
             datasets_list.append(small_ds)
@@ -235,10 +226,8 @@ def save_task_samples_grid(tasks, config, output_file="task_samples_grid.png"):
 
     for i, task in enumerate(tasks):
         loader = task.load_mandi_subset(samples_per_class=1)
-        # Get single batch (which is the whole subset)
         batch_images, batch_labels = next(iter(loader))
         
-        # batch_images is a Tensor (B, FlatDim)
         batch_images = batch_images.numpy()
         batch_labels = batch_labels.numpy()
         
@@ -254,11 +243,6 @@ def save_task_samples_grid(tasks, config, output_file="task_samples_grid.png"):
                 img = flat_img.reshape(side, side)
                 cmap = 'gray'
             else:
-                img = flat_img.reshape(side, side, channels)
-                # If PyTorch loaded as CHW, but we flattened, reshaping to HWC for matplotlib might need care.
-                # Standard Flatten was (C,H,W) -> contiguous.
-                # If channels=3, flattened is RRR...GGG...BBB...
-                # We need to reshape (3, H, W) then transpose to (H, W, 3)
                 img_chw = flat_img.reshape(channels, side, side)
                 img = np.moveaxis(img_chw, 0, -1)
                 cmap = None

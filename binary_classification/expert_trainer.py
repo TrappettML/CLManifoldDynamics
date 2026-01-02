@@ -7,8 +7,11 @@ def train_single_expert(config, train_task, test_ds):
     """
     Trains n_repeats models on a single task from scratch using a fully 
     JIT-compiled scan loop, evaluating on the test set periodically.
+    
+    UPDATED: Now synchronizes evaluation with config.log_frequency to match 
+    the ContinualLearner's checkpointing cadence.
     """
-    print(f"--- Training Expert on {train_task.name} (Optimized with Eval) ---")
+    print(f"--- Training Expert on {train_task.name} (Synchronized to LogFreq: {config.log_frequency}) ---")
     
     learner = ContinualLearner(config)
     
@@ -40,7 +43,12 @@ def train_single_expert(config, train_task, test_ds):
             new_state, train_losses, train_accs = learner._train_epoch_jit(curr_state, t_imgs, t_lbls)
             
             # B. Conditional Eval Step
-            is_eval_step = (epoch_idx % config.eval_freq == 0) | (epoch_idx == config.epochs_per_task - 1)
+            # Mirror Learner: Evaluate at the END of a block.
+            # Learner evaluates after `log_frequency` steps.
+            # We use (epoch_idx + 1) because epoch_idx is 0-based.
+            # Example: log_freq=10. Learner evals at end of epoch 10.
+            # Here: idx 9 -> (9+1)%10 == 0 -> True.
+            is_eval_step = ((epoch_idx + 1) % config.log_frequency == 0)
             
             def true_eval_fn(s):
                 # Returns (n_repeats,) arrays
@@ -92,7 +100,8 @@ def train_single_expert(config, train_task, test_ds):
     te_l = np.array(te_l)   # (Epochs, Repeats) - contains NaNs
     te_a = np.array(te_a)
 
-    # Calculate final stats (last row is forced eval)
+    # Calculate final stats
+    # Since config enforces epochs % log_frequency == 0, the last epoch is always an eval step.
     final_losses = te_l[-1]
     final_accs = te_a[-1]
     
