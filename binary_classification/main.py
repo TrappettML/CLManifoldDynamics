@@ -103,10 +103,11 @@ def main():
         expert_stats[task.name] = stats
 
     # 4a. CL metrics
-    cl_metrics = cl_metrics.compute_and_log_cl_metrics(
+    cl_met_results = cl_metrics.compute_and_log_cl_metrics(
         global_history, expert_histories, config, metric_type='acc'
     )
-    print(f"{cl_metrics}")
+    print(f"{cl_met_results}")
+
     # 5. Plotting
     print("\nGenerating Plots...")
     
