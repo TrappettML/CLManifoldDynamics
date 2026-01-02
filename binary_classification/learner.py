@@ -20,13 +20,11 @@ class ContinualLearner:
 
     def preload_data(self, data_loader):
         """
-        Converts a PyTorch DataLoader (yielding Tensors) into JAX-ready numpy arrays.
-        Reads the entire dataset into memory (RAM).
+        Converts a PyTorch DataLoader into JAX-ready numpy arrays.
         """
         images_list = []
         labels_list = []
         
-        # Iterate over the PyTorch DataLoader
         for batch_imgs, batch_lbls in data_loader:
             images_list.append(batch_imgs.numpy())
             labels_list.append(batch_lbls.numpy())
@@ -34,11 +32,9 @@ class ContinualLearner:
         if not images_list:
             raise ValueError("DataLoader returned no data.")
 
-        # Concatenate all batches
         images = np.concatenate(images_list, axis=0)
         labels = np.concatenate(labels_list, axis=0)
         
-        # Ensure labels have the shape (N, 1) if they are (N,)
         if labels.ndim == 1: 
             labels = labels[..., None]
             
@@ -51,6 +47,10 @@ class ContinualLearner:
 
     @partial(jax.jit, static_argnums=(0,))
     def _train_epoch_jit(self, state, batch_images, batch_labels):
+        """
+        Trains for one epoch (scans over the provided batches).
+        batch_images shape: (n_batches, batch_size, dim)
+        """
         def train_step(curr_state, batch):
             b_img, b_lbl = batch
             def loss_fn(params):
@@ -75,13 +75,11 @@ class ContinualLearner:
         parallel_train = jax.vmap(parallel_scan, in_axes=(0, None, None))
         final_state, (losses, accs) = parallel_train(state, batch_images, batch_labels)
         
-        # losses/accs shape: (n_repeats, n_batches)
         # Return mean over batches -> (n_repeats,)
         return final_state, jnp.mean(losses, axis=1), jnp.mean(accs, axis=1)
 
     @partial(jax.jit, static_argnums=(0,))
     def _eval_jit(self, state, images, labels):
-        # eval_single maps over 'state' (n_repeats) but shares 'images' (dataset)
         def eval_single(curr_state):
             logits = curr_state.apply_fn({'params': curr_state.params}, images)
             loss = optax.sigmoid_binary_cross_entropy(logits, labels).mean()
@@ -91,7 +89,6 @@ class ContinualLearner:
 
         return jax.vmap(eval_single)(state)
 
-    # === Feature Extraction JIT ===
     @partial(jax.jit, static_argnums=(0,))
     def _extract_features_jit(self, state, images):
         if images.ndim == 4: 
@@ -110,136 +107,145 @@ class ContinualLearner:
     # --- High Level Loop ---
 
     def train_task(self, task, test_streams, global_history, analysis_subset=None):
-        print(f"--- CL Training on {task.name} (x{self.config.n_repeats} Repeats) [SCAN Optimized] ---")
+        print(f"--- CL Training on {task.name} (x{self.config.n_repeats}) [Optimized Nested Scan] ---")
         
         for h in self.hooks: h.on_task_start(task, self.state)
 
-        # 1. Load Train Data
+        # 1. Load and Shape Train Data
         train_loader = task.load_data()
-        train_imgs, train_lbls = self.preload_data(train_loader)
+        train_imgs_raw, train_lbls_raw = self.preload_data(train_loader)
         
-        # Reshape for JAX scan: (N_Batches, Batch_Size, Dim)
-        n_samples = train_imgs.shape[0]
-        n_batches = n_samples // self.config.batch_size
-        if n_batches == 0:
-             raise ValueError(f"Dataset {task.name} too small for batch size {self.config.batch_size}")
+        n_samples = train_imgs_raw.shape[0]
+        batches_per_epoch = n_samples // self.config.batch_size
+        
+        if batches_per_epoch == 0:
+            raise ValueError(f"Dataset too small for batch size {self.config.batch_size}")
 
-        train_imgs_reshaped = train_imgs[:n_batches*self.config.batch_size].reshape(n_batches, self.config.batch_size, -1)
-        train_lbls_reshaped = train_lbls[:n_batches*self.config.batch_size].reshape(n_batches, self.config.batch_size, -1)
+        # Crop to exact batch fit
+        limit = batches_per_epoch * self.config.batch_size
+        train_imgs_raw = train_imgs_raw[:limit]
+        train_lbls_raw = train_lbls_raw[:limit]
 
-        # 2. Prepare Analysis Data (if any)
+        # Reshape to (Batches_Per_Epoch, Batch_Size, Dim)
+        # We will reuse this static block for every epoch
+        epoch_data_imgs = train_imgs_raw.reshape(batches_per_epoch, self.config.batch_size, -1)
+        epoch_data_lbls = train_lbls_raw.reshape(batches_per_epoch, self.config.batch_size, -1)
+        
+        # Move to GPU once
+        epoch_data_imgs = jax.device_put(epoch_data_imgs)
+        epoch_data_lbls = jax.device_put(epoch_data_lbls)
+
+        # 2. Analysis Data
         analysis_imgs = None
         if analysis_subset:
-            print(f"    > Preloading analysis subset for representation tracking...")
+            print(f"    > Preloading analysis subset...")
             analysis_imgs, _ = self.preload_data(analysis_subset)
             if analysis_imgs.ndim > 2:
                 analysis_imgs = analysis_imgs.reshape(-1, analysis_imgs.shape[-1])
 
-        # 3. Cache Test Data (Preload all streams to GPU)
-        # We assume test_streams keys are stable.
+        # 3. Test Data Cache
         if not hasattr(self, 'cached_test_data'):
             self.cached_test_data = {}
-        
-        # Ensure we have all current test streams loaded
         for t_name, t_loader in test_streams.items():
             if t_name not in self.cached_test_data:
                 self.cached_test_data[t_name] = self.preload_data(t_loader)
-        
-        # Create a snapshot of test data for JIT
-        # This dictionary maps task_name -> (imgs, lbls)
         test_data_jax = {k: v for k, v in self.cached_test_data.items()}
 
-        # 4. Define The Super-Scan
-        # We define this closure inside the method to capture 'test_data_jax' and 'analysis_imgs'
+        # 4. Define Nested Scan
+        # Outer Loop: Runs 'log_freq' blocks. Saves Weights.
+        # Inner Loop: Runs 1 epoch 'log_freq' times. Accumulates Loss.
         
         @jax.jit
-        def full_task_scan(initial_state, t_imgs, t_lbls):
+        def nested_task_scan(initial_state):
             
-            def epoch_step(carry_state, epoch_idx):
+            log_freq = self.config.log_frequency
+            total_epochs = self.config.epochs_per_task
+            n_outer_steps = total_epochs // log_freq
+            
+            # INNER LOOP: Runs for 'log_freq' epochs
+            def inner_loop(carry, _):
+                curr_state = carry
+                new_state, tr_loss, tr_acc = self._train_epoch_jit(curr_state, epoch_data_imgs, epoch_data_lbls)
+                return new_state, (tr_loss, tr_acc)
+
+            # OUTER LOOP: Runs every 'log_freq' steps
+            def outer_step(carry, _):
+                state_start = carry
                 
-                # A. TRAIN STEP
-                new_state, tr_losses, tr_accs = self._train_epoch_jit(carry_state, t_imgs, t_lbls)
+                # A. Run Training Block (Inner Loop)
+                state_end, (block_losses, block_accs) = jax.lax.scan(
+                    inner_loop, state_start, None, length=log_freq
+                )
                 
-                # B. EVAL STEP (Conditional)
-                is_eval_step = (epoch_idx % self.config.eval_freq == 0) | (epoch_idx == self.config.epochs_per_task - 1)
-                
+                # B. Run Eval (Once per block, using state at end of block)
                 def run_eval(s):
-                    # Evaluate on ALL available test streams
                     results = {}
                     for t_name, (ti, tl) in test_data_jax.items():
                         l, a = self._eval_jit(s, ti, tl)
                         results[t_name] = (l, a)
                     return results
 
-                def skip_eval(s):
-                    # Return NaNs with correct shape
-                    results = {}
-                    dummy_shape = tr_losses.shape # (n_repeats,)
-                    for t_name in test_data_jax.keys():
-                        results[t_name] = (
-                            jnp.full(dummy_shape, jnp.nan),
-                            jnp.full(dummy_shape, jnp.nan)
-                        )
-                    return results
+                test_metrics_sparse = run_eval(state_end)
 
-                test_metrics_tree = jax.lax.cond(is_eval_step, run_eval, skip_eval, new_state)
-
-                # C. CAPTURE DATA
-                # Weights
-                flat_w = self.get_flat_params(new_state)
-                
-                # Representations (only if analysis_imgs provided)
+                # C. Capture Heavy Data (Weights/Reps) - Sparse
+                flat_w = self.get_flat_params(state_end)
                 if analysis_imgs is not None:
-                    reps = self._extract_features_jit(new_state, analysis_imgs)
+                    reps = self._extract_features_jit(state_end, analysis_imgs)
                 else:
-                    reps = jnp.zeros((1,)) # Dummy
+                    reps = jnp.zeros((1,))
 
-                # Pack metrics
                 metrics = {
-                    'tr_loss': tr_losses,
-                    'tr_acc': tr_accs,
-                    'test': test_metrics_tree,
+                    'tr_loss': block_losses,  # (log_freq, n_repeats)
+                    'tr_acc': block_accs,     # (log_freq, n_repeats)
+                    'test': test_metrics_sparse,
                     'weights': flat_w,
                     'reps': reps
                 }
                 
-                return new_state, metrics
+                return state_end, metrics
 
-            epochs_range = jnp.arange(self.config.epochs_per_task)
-            final_state, history = jax.lax.scan(epoch_step, initial_state, epochs_range)
+            # Execute Outer Scan
+            outer_range = jnp.arange(n_outer_steps)
+            final_state, history = jax.lax.scan(outer_step, initial_state, outer_range)
             return final_state, history
 
-        # 5. Execute Scan
-        print(f"    > Compiling and running {self.config.epochs_per_task} epochs...")
-        self.state, history_tree = full_task_scan(self.state, train_imgs_reshaped, train_lbls_reshaped)
+        # 5. Execute
+        print(f"    > Running {self.config.epochs_per_task} epochs (Logging every {self.config.log_frequency})...")
+        self.state, history_tree = nested_task_scan(self.state)
 
-        # 6. Unpack and Process Results to CPU
-        # Convert entire history tree to numpy at once to minimize transfers
+        # 6. Unpack Results
+        # Convert to numpy
         history_np = jax.tree_util.tree_map(np.array, history_tree)
 
-        # Update Global History
-        # We iterate through the time dimension (axis 0 of the scanned arrays)
-        for ep in range(self.config.epochs_per_task):
-            global_history['train_loss'].append(history_np['tr_loss'][ep])
-            global_history['train_acc'].append(history_np['tr_acc'][ep])
-            
-            # Test Metrics
-            for t_name in history_np['test'].keys():
-                # history_np['test'][t_name] is tuple (loss_arr, acc_arr)
-                t_loss = history_np['test'][t_name][0][ep]
-                t_acc = history_np['test'][t_name][1][ep]
-                
-                global_history['test_metrics'][t_name]['loss'].append(t_loss)
-                global_history['test_metrics'][t_name]['acc'].append(t_acc)
-
-        # Extract large analysis arrays
-        weight_history = history_np['weights'] # (Epochs, Repeats, Params)
+        # -- Process Training Metrics (Flatten Inner Loops) --
+        # history_np['tr_loss'] shape: (OuterSteps, LogFreq, Repeats)
+        # We reshape to (TotalEpochs, Repeats)
+        tr_loss_dense = history_np['tr_loss'].reshape(-1, self.config.n_repeats)
+        tr_acc_dense = history_np['tr_acc'].reshape(-1, self.config.n_repeats)
         
-        representation_history = None
-        if analysis_subset:
-            representation_history = history_np['reps'] # (Epochs, Repeats, Samples, Dim)
+        global_history['train_loss'].extend(tr_loss_dense)
+        global_history['train_acc'].extend(tr_acc_dense)
 
-        # 7. Final Hooks
+        # -- Process Test Metrics (Stretch Sparse to Dense) --
+        # history_np['test'][task][0] shape: (OuterSteps, Repeats)
+        # We repeat each entry 'log_freq' times to match 'TotalEpochs' for simple plotting
+        for t_name in history_np['test'].keys():
+            sparse_loss = history_np['test'][t_name][0]
+            sparse_acc = history_np['test'][t_name][1]
+            
+            dense_loss = np.repeat(sparse_loss, self.config.log_frequency, axis=0)
+            dense_acc = np.repeat(sparse_acc, self.config.log_frequency, axis=0)
+            
+            global_history['test_metrics'][t_name]['loss'].extend(dense_loss)
+            global_history['test_metrics'][t_name]['acc'].extend(dense_acc)
+
+        # -- Extract Sparse Heavy Data --
+        weight_history = history_np['weights'] # (OuterSteps, Repeats, Params)
+        
+        rep_history = None
+        if analysis_subset:
+            rep_history = history_np['reps'] # (OuterSteps, Repeats, Samples, Dim)
+
         for h in self.hooks: h.on_task_end(task, self.state, metrics=None)
         
-        return representation_history, weight_history
+        return rep_history, weight_history

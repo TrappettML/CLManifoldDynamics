@@ -4,6 +4,8 @@ from torchvision import datasets, transforms
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+import pickle
+import warnings
 
 # --- Dataset Metadata ---
 DATASET_CONFIGS = {
@@ -13,11 +15,55 @@ DATASET_CONFIGS = {
     'cifar100': {'input_dim': 3072, 'num_classes': 100, 'channels': 1},
 }
 
+class PatchedCIFAR100(datasets.CIFAR100):
+    """
+    A patched version of CIFAR100 that safely handles the NumPy/Pickle 
+    VisibleDeprecationWarning during data loading.
+    """
+    def __init__(self, root, train=True, transform=None, target_transform=None, download=False):
+        # Initialize the base class but skip the potentially noisy loading logic 
+        # by passing download=False initially (we handle it manually below)
+        super(datasets.CIFAR100, self).__init__(root, transform=transform, 
+                                                target_transform=target_transform)
+        
+        self.train = train
+        if download:
+            self.download()
+
+        if not self._check_integrity():
+            raise RuntimeError('Dataset not found or corrupted.')
+
+        if self.train:
+            downloaded_list = self.train_list
+        else:
+            downloaded_list = self.test_list
+
+        self.data = []
+        self.targets = []
+
+        # Reimplements the loading loop with a targeted warning filter
+        for file_name, checksum in downloaded_list:
+            file_path = os.path.join(self.root, self.base_folder, file_name)
+            with open(file_path, 'rb') as f:
+                with warnings.catch_warnings():
+                    # Filter the specific warning caused by the align=0 flag in old pickles
+                    warnings.filterwarnings("ignore", category=np.VisibleDeprecationWarning)
+                    entry = pickle.load(f, encoding='latin1')
+                    
+                self.data.append(entry['data'])
+                if 'labels' in entry:
+                    self.targets.extend(entry['labels'])
+                else:
+                    self.targets.extend(entry['fine_labels'])
+
+        self.data = np.vstack(self.data).reshape(-1, 3, 32, 32)
+        self.data = self.data.transpose((0, 2, 3, 1))  # convert to HWC
+
 DATASET_CLASS_MAP = {
     'mnist': datasets.MNIST,
     'kmnist': datasets.KMNIST,
     'fashion_mnist': datasets.FashionMNIST,
-    'cifar100': datasets.CIFAR100
+    'cifar100': PatchedCIFAR100  # Updated to use the patched class
 }
 
 def get_dataset_dims(dataset_name, downsample_shape=None):

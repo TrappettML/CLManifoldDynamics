@@ -5,12 +5,8 @@ import data_utils
 import config as config_module
 from numpy.linalg import svd, norm
 
-def compute_rep_metrics(representations, tau=0.1):
-    """
-    Computes metrics, handling Potential NaNs in input.
-    representations: (n_repeats, n_samples, hidden_dim)
-    """
-    n_repeats, n_samples, hidden_dim = representations.shape
+def compute_rep_metrics(representations, hidden_dim, tau=0.1):
+    n_repeats, n_samples, _ = representations.shape
     
     metrics = {
         'Dormant Neurons (Ratio)': [],
@@ -23,100 +19,58 @@ def compute_rep_metrics(representations, tau=0.1):
     
     for r in range(n_repeats):
         F = representations[r]
-        
-        # Check for NaNs (if user decided to NaN out stopped models)
         if np.isnan(F).any():
             for k in metrics: metrics[k].append(np.nan)
             continue
             
-        # F.1 Dormant Neurons (Ratio)
-        avg_activation_per_neuron = np.mean(F, axis=0)
-        layer_mean_activation = np.mean(avg_activation_per_neuron)
-        if layer_mean_activation > 1e-9:
-            scores = avg_activation_per_neuron / layer_mean_activation
-        else:
-            scores = np.zeros_like(avg_activation_per_neuron)
-        dormant_count = np.sum(scores <= tau)
-        metrics['Dormant Neurons (Ratio)'].append(dormant_count / hidden_dim)
+        # Dormant Neurons
+        avg_act = np.mean(F, axis=0)
+        layer_mean = np.mean(avg_act)
+        scores = avg_act / layer_mean if layer_mean > 1e-9 else np.zeros_like(avg_act)
+        metrics['Dormant Neurons (Ratio)'].append(np.sum(scores <= tau) / hidden_dim)
         
-        # F.2 Active Units
-        active_per_sample = np.mean(F > 0, axis=1)
-        metrics['Active Units (Fraction)'].append(np.mean(active_per_sample))
+        # Active Units
+        metrics['Active Units (Fraction)'].append(np.mean(np.mean(F > 0, axis=1)))
         
-        # SVD for Rank Metrics
+        # SVD
         try:
             _, s, _ = svd(F, full_matrices=False)
-            
-            # F.3 Stable Rank
             s_sum = np.sum(s)
             if s_sum > 1e-9:
-                cumulative_energy = np.cumsum(s) / s_sum
-                stable_rank = np.argmax(cumulative_energy > 0.99) + 1 
-            else:
-                stable_rank = 0
-            metrics['Stable Rank'].append(stable_rank)
-            
-            # F.4 Effective Rank
-            if s_sum > 1e-9:
+                cum_energy = np.cumsum(s) / s_sum
+                stable_rank = np.argmax(cum_energy > 0.99) + 1
                 p = s / s_sum
                 p = p[p > 0]
-                entropy = -np.sum(p * np.log(p))
-                effective_rank = np.exp(entropy)
+                effective_rank = np.exp(-np.sum(p * np.log(p)))
             else:
-                effective_rank = 0.0
+                stable_rank, effective_rank = 0, 0.0
+            metrics['Stable Rank'].append(stable_rank)
             metrics['Effective Rank'].append(effective_rank)
-            
         except np.linalg.LinAlgError:
             metrics['Stable Rank'].append(0)
             metrics['Effective Rank'].append(0)
 
-        # F.7 Feature Norm
-        row_norms = norm(F, axis=1)
-        metrics['Feature Norm'].append(np.mean(row_norms))
-        
-        # F.8 Feature Variance
-        col_vars = np.var(F, axis=0)
-        metrics['Feature Variance'].append(np.mean(col_vars))
+        # Norm/Var
+        metrics['Feature Norm'].append(np.mean(norm(F, axis=1)))
+        metrics['Feature Variance'].append(np.mean(np.var(F, axis=0)))
 
-    for k in metrics:
-        metrics[k] = np.array(metrics[k])
-        
-    return metrics
+    return {k: np.array(v) for k, v in metrics.items()}
 
-def compute_weight_metrics(current_weights, start_of_task_weights, init_weights):
-    n_repeats, n_params = current_weights.shape
-    
-    metrics = {
-        'Weight Magnitude': [],
-        'Weight Difference (Task)': [],
-        'Weight Difference (Init)': []
-    }
+def compute_weight_metrics(current, ref_task, ref_init):
+    n_repeats = current.shape[0]
+    metrics = {'Weight Magnitude': [], 'Weight Difference (Task)': [], 'Weight Difference (Init)': []}
     
     for r in range(n_repeats):
-        w = current_weights[r]
-        w_task_ref = start_of_task_weights[r]
-        w_init_ref = init_weights[r]
-        
+        w, w_t, w_i = current[r], ref_task[r], ref_init[r]
         if np.isnan(w).any():
              for k in metrics: metrics[k].append(np.nan)
              continue
 
-        # --- F.5 Weight Magnitude ---
-        wm = np.sqrt(np.mean(w**2))
-        metrics['Weight Magnitude'].append(wm)
+        metrics['Weight Magnitude'].append(np.sqrt(np.mean(w**2)))
+        metrics['Weight Difference (Task)'].append(np.sqrt(np.mean((w - w_t)**2)))
+        metrics['Weight Difference (Init)'].append(np.sqrt(np.mean((w - w_i)**2)))
         
-        # --- F.6 Weight Difference (Task-Level) ---
-        wd_task = np.sqrt(np.mean((w - w_task_ref)**2))
-        metrics['Weight Difference (Task)'].append(wd_task)
-
-        # --- F.6 Weight Difference (From Initialization) ---
-        wd_init = np.sqrt(np.mean((w - w_init_ref)**2))
-        metrics['Weight Difference (Init)'].append(wd_init)
-        
-    for k in metrics:
-        metrics[k] = np.array(metrics[k])
-        
-    return metrics
+    return {k: np.array(v) for k, v in metrics.items()}
 
 def run_analysis_pipeline(config):
     print("--- Starting Plasticine Metric Analysis ---")
@@ -125,26 +79,15 @@ def run_analysis_pipeline(config):
     task_names = [t.name for t in tasks]
     
     init_weights_path = os.path.join(config.reps_dir, "init_weights.npy")
-    if os.path.exists(init_weights_path):
-        init_weights = np.load(init_weights_path)
-    else:
-        print("Warning: init_weights.npy not found.")
-        init_weights = None
+    init_weights = np.load(init_weights_path) if os.path.exists(init_weights_path) else None
 
-    history = {
-        'Dormant Neurons (Ratio)': [],
-        'Active Units (Fraction)': [],
-        'Stable Rank': [],
-        'Effective Rank': [],
-        'Feature Norm': [],
-        'Feature Variance': [],
-        'Weight Magnitude': [],   
-        'Weight Difference (Task)': [],
-        'Weight Difference (Init)': []
-    }
+    history = {k: [] for k in [
+        'Dormant Neurons (Ratio)', 'Active Units (Fraction)', 'Stable Rank', 'Effective Rank',
+        'Feature Norm', 'Feature Variance', 'Weight Magnitude', 'Weight Difference (Task)', 'Weight Difference (Init)'
+    ]}
     
     task_boundaries = []
-    total_epochs = 0
+    current_epoch_counter = 0
     previous_task_final_weights = None 
     
     for t_name in task_names:
@@ -155,73 +98,62 @@ def run_analysis_pipeline(config):
             continue
             
         print(f"Processing {t_name}...")
-        rep_data = np.load(rep_path)   
-        w_data = np.load(w_path)       
-        n_epochs = rep_data.shape[0]
+        rep_data = np.load(rep_path)   # (n_steps, n_repeats, samples, dim)
+        w_data = np.load(w_path)       # (n_steps, n_repeats, params)
         
-        if previous_task_final_weights is None:
-             if init_weights is not None:
-                 start_of_task_weights = init_weights
-             else:
-                 start_of_task_weights = w_data[0] 
-        else:
-             start_of_task_weights = previous_task_final_weights
+        n_steps = rep_data.shape[0]
+        # Calculate how many actual epochs this represents
+        epochs_in_task = n_steps * config.log_frequency
 
-        for epoch_idx in range(n_epochs):
-            rep_step_metrics = compute_rep_metrics(rep_data[epoch_idx])
-            for key, val in rep_step_metrics.items():
-                history[key].append(val)
+        start_of_task_weights = init_weights if previous_task_final_weights is None else previous_task_final_weights
+        if start_of_task_weights is None: start_of_task_weights = w_data[0]
+
+        for i in range(n_steps):
+            rep_metrics = compute_rep_metrics(rep_data[i], config.hidden_dim)
+            for k, v in rep_metrics.items(): history[k].append(v)
                 
             if init_weights is not None:
-                w_step_metrics = compute_weight_metrics(
-                    w_data[epoch_idx], 
-                    start_of_task_weights, 
-                    init_weights
-                )
-                for key, val in w_step_metrics.items():
-                    history[key].append(val)
+                w_metrics = compute_weight_metrics(w_data[i], start_of_task_weights, init_weights)
+                for k, v in w_metrics.items(): history[k].append(v)
                 
         previous_task_final_weights = w_data[-1]
-        total_epochs += n_epochs
-        task_boundaries.append(total_epochs)
+        current_epoch_counter += epochs_in_task
+        task_boundaries.append(current_epoch_counter)
 
-    # Convert history to arrays
-    for key in history:
-        if len(history[key]) > 0:
-            history[key] = np.stack(history[key]) 
+    # Convert to arrays
+    for k in history:
+        if len(history[k]) > 0: history[k] = np.stack(history[k])
 
-    # Plotting using NanMean / NanStd
-    metric_names = list(history.keys())
-    metric_names = [m for m in metric_names if len(history[m]) > 0]
+    # Plotting
+    metric_names = [m for m in history.keys() if len(history[m]) > 0]
     n_metrics = len(metric_names)
     
     fig, axes = plt.subplots(n_metrics, 1, figsize=(10, 3 * n_metrics), sharex=True)
     if n_metrics == 1: axes = [axes]
     
-    x_axis = np.arange(1, total_epochs + 1)
+    # Scale X-axis to represent actual Epochs
+    total_steps = len(history[metric_names[0]])
+    x_axis = np.arange(1, total_steps + 1) * config.log_frequency
     
     print("Plotting results...")
-    
     for i, metric in enumerate(metric_names):
         ax = axes[i]
-        data = history[metric] 
-        
-        # USE NANMEAN / NANSTD here
+        data = history[metric]
         mean = np.nanmean(data, axis=1)
         std = np.nanstd(data, axis=1)
         
         ax.plot(x_axis, mean, label='Mean', color='blue', linewidth=2)
-        ax.fill_between(x_axis, mean - std, mean + std, color='blue', alpha=0.2, label='Std Dev')
+        ax.fill_between(x_axis, mean - std, mean + std, color='blue', alpha=0.2)
         
         ax.set_ylabel(metric)
         for boundary in task_boundaries[:-1]:
             ax.axvline(x=boundary, color='red', linestyle='--', alpha=0.6)
             
         if i == 0:
-            ax.set_title(f"Plasticine Metrics Analysis ({config.dataset_name}) - ES={config.early_stopping}")
+            ax.set_title(f"Plasticine Metrics ({config.dataset_name}) - LogFreq={config.log_frequency}")
 
     axes[-1].set_xlabel('Epochs (Continual)')
     plt.tight_layout()
-    save_path = os.path.join(config.figures_dir, f"plasticine_metrics_{config.dataset_name}_ES.png")
+    save_path = os.path.join(config.figures_dir, f"plasticine_metrics_{config.dataset_name}.png")
     plt.savefig(save_path)
     print(f"Analysis plots saved to {save_path}")
