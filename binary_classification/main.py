@@ -12,6 +12,7 @@ import expert_trainer
 from hooks import CLHook
 import analysis
 import cl_metrics  
+import manifold_analysis
 
 
 class LoggerHook(CLHook):
@@ -52,12 +53,15 @@ def main():
     
     task_boundaries = []
     total_epochs = 0
+    task_names = [t.name for t in train_tasks] # Store names for analysis later
 
     # 3. CL Loop
     for task in train_tasks:
         analysis_ds = task.load_mandi_subset(samples_per_class=config.mandi_samples)
         
         _, subset_lbls = learner.preload_data(analysis_ds)
+
+        if subset_lbls.ndim > 1: subset_lbls = subset_lbls.flatten()
         np.save(f"{config.reps_dir}/{task.name}_labels.npy", subset_lbls)
 
         # Train
@@ -67,7 +71,6 @@ def main():
         
         # Save History (Sparse)
         if rep_history is not None:
-            # rep_history is already a numpy array from learner (tree_mapped)
             np.save(f"{config.reps_dir}/{task.name}_reps_per_epoch.npy", rep_history)
 
         if w_history is not None:
@@ -238,6 +241,9 @@ def main():
     
     # 6. Analysis
     analysis.run_analysis_pipeline(config)
+
+    # 7 Manifold Analysis
+    manifold_analysis.analyze_manifold_trajectory(config, task_names)
     
 if __name__ == "__main__":
     main()

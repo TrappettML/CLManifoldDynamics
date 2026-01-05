@@ -1,9 +1,11 @@
 import ml_collections
 
+dataset = 'fashion_mnist'
+
 def get_config():
     config = ml_collections.ConfigDict()
     
-    config.dataset_name = 'fashion_mnist' # Updated to fashion_mnist as requested
+    config.dataset_name = dataset
     config.seed = 42
     config.data_dir = "./data"
     config.figures_dir = "./figures"
