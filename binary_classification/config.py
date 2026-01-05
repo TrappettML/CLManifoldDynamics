@@ -5,6 +5,9 @@ dataset = 'fashion_mnist'
 def get_config():
     config = ml_collections.ConfigDict()
     
+    # --- New: Algorithm Selector ---
+    config.algorithm = 'SL'  # Options: 'SL', 'RL', 'UL', etc.
+    
     config.dataset_name = dataset
     config.seed = 42
     config.data_dir = "./data"
@@ -23,15 +26,16 @@ def get_config():
     
     # --- Optimization & Logging ---
     config.epochs_per_task = 1000
-    config.log_frequency = 10   # Save weights/reps every 10 epochs (1000/10 = 100 saves)
+    config.log_frequency = 10 
+    config.n_repeats = 20
+    config.eval_freq = 10 
     
-    # Ensure consistency
     if config.epochs_per_task % config.log_frequency != 0:
          raise ValueError("epochs_per_task must be divisible by log_frequency")
 
-    config.n_repeats = 20
+    # mandi variables
     config.mandi_samples = 50 
-    config.eval_freq = 10  
+    config.n_t = 50
 
     config.weight_decay = 0.0
     config.early_stopping = False
@@ -40,6 +44,5 @@ def get_config():
 
     config.metric_type = 'acc'
     config.m_integrator = 'final'
-
     
     return config

@@ -10,8 +10,8 @@ import config as config_module
 from learner import ContinualLearner
 import expert_trainer
 from hooks import CLHook
-import analysis
-import cl_metrics  
+import binary_classification.plastic_analysis as plastic_analysis
+import binary_classification.cl_analysis as cl_analysis  
 import manifold_analysis
 
 
@@ -20,6 +20,7 @@ class LoggerHook(CLHook):
         print(f"[Hook] Starting Task ID {task.task_id}")
 
 def main():
+    print(f"Algorithm: {config.algorithm}")
     print(f"Using device: {jax.devices()}")
     config = config_module.get_config()
     print(f"Configuration Loaded (Repeats={config.n_repeats}, LogFreq={config.log_frequency})")
@@ -106,7 +107,7 @@ def main():
         expert_stats[task.name] = stats
 
     # 4a. CL metrics
-    cl_met_results = cl_metrics.compute_and_log_cl_metrics(
+    cl_met_results = cl_analysis.compute_and_log_cl_metrics(
         global_history, expert_histories, config
     )
     print(f"{cl_met_results}")
@@ -240,7 +241,7 @@ def main():
     print(f"Improved plots saved to {save_path}")
     
     # 6. Analysis
-    analysis.run_analysis_pipeline(config)
+    plastic_analysis.run_analysis_pipeline(config)
 
     # 7 Manifold Analysis
     manifold_analysis.analyze_manifold_trajectory(config, task_names)

@@ -59,7 +59,10 @@ def train_single_expert(config, train_task, test_ds):
                 # Returns NaNs of same shape as eval -> (n_repeats,)
                 # We use train_losses shape to determine n_repeats
                 dummy_shape = train_losses.shape 
-                return jnp.full(dummy_shape, jnp.nan), jnp.full(dummy_shape, jnp.nan)
+                
+                # FIX: Explicitly match the dtype of the real computation to satisfy lax.cond
+                return (jnp.full(dummy_shape, jnp.nan, dtype=train_losses.dtype), 
+                        jnp.full(dummy_shape, jnp.nan, dtype=train_accs.dtype))
 
             test_losses, test_accs = jax.lax.cond(
                 is_eval_step,

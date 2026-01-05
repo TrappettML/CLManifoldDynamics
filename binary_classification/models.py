@@ -1,4 +1,15 @@
 from flax import linen as nn
+import jax
+from flax.training import train_state
+
+class TrainState(train_state.TrainState):
+    """
+    Custom TrainState. 
+    Can be extended to include batch_stats or mutable variables 
+    (e.g., for BatchNorm, or Target Networks in RL).
+    """
+    pass
+
 
 class TwoLayerMLP(nn.Module):
     hidden_dim: int

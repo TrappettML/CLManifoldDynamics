@@ -9,15 +9,19 @@ import os
 jax.config.update("jax_enable_x64", True)
 
 # --- JAX-JIT Compiled Optimization Kernels ---
-@jax.jit
+
+# FIXED: Added static_argnums for M(2), P(3), N(4) so they can be used for shapes
+@jax.jit(static_argnums=(2, 3, 4))
 def solve_single_anchor(key, flat_manifolds, M, P, N):
     # 1. Sample direction t and dichotomy y
     key, t_key, y_key = jax.random.split(key, 3)
     
     # CRITICAL FIX: Do NOT normalize t. Keep it standard Normal.
     # Algorithm 2 Step 1: t_k ~ N(0, I_N)
+    # N is now static, so this shape creation works
     t = jax.random.normal(t_key, (N,)) 
     
+    # P is now static, so this shape creation works
     y = jax.random.choice(y_key, jnp.array([-1.0, 1.0]), (P,))
     
     # 2. Formulate QP
@@ -25,8 +29,6 @@ def solve_single_anchor(key, flat_manifolds, M, P, N):
     q_vec = -t
     
     # Constraints: y_i * (point_j . x) <= 0
-    # This projects t onto the polar cone. 
-    # The duals z will recover the support vectors (anchors).
     y_expanded = jnp.repeat(y, M) # (P*M,)
     G_mat = y_expanded[:, None] * flat_manifolds # (P*M, N)
     h_vec = jnp.zeros((P * M,))
@@ -103,15 +105,6 @@ def compute_metrics_from_anchors(anchors, t_vectors):
         norm_proj_axis_sq = v_axis.T @ G_axis_inv @ v_axis
         
         # B. Projection onto Total Subspace (Center + Axis)
-        # Note: The paper sometimes defines R_M via projection onto full anchor span vs axis span.
-        # Let's follow the GLUE definition B.6 closely:
-        # R_M approx sqrt( E [ || proj_total t ||^2 / ( || proj_axis t ||^2 - || proj_total t ||^2 ) ] ) ??
-        # Wait, the definition in Source 3275 is: 
-        # R_M^2 approx E [ || proj_S t ||^2 / ( || proj_S1 t ||^2 - || proj_S t ||^2 ) ] ? 
-        # Actually, usually R^2 = ||s^1||^2 / ||s^0||^2. 
-        # Let's use the standard approximation often used in code:
-        # P_tot t where basis is {s_i}. 
-        
         v_tot = anchor_k @ t_k
         G_tot = anchor_k @ anchor_k.T
         G_tot_inv = jnp.linalg.pinv(G_tot, rcond=1e-5)
@@ -126,39 +119,17 @@ def compute_metrics_from_anchors(anchors, t_vectors):
     # --- 3. Aggregate Metrics ---
     
     # Manifold Dimension D_M = E[ || proj_axes t ||^2 ]
-    # Note: If normalized properly, this is roughly sum of variances.
     D_M = jnp.mean(norm_proj_axis_sq)
     
     # Manifold Radius R_M
-    # Based on the capacity equation alpha ~ (1+1/R^2)/D
-    # And R_M ~ Total_Size / Axis_Size?
-    # Using the approximation from paper (approximate recovery):
-    # R_M_sq = E[ || proj_tot ||^2 ] / E[ || proj_axes ||^2 - || proj_tot ||^2 ] ?
-    # Standard geometric interpretation: ||s^1|| / ||s^0||.
-    # Let's use the explicit projection norms calculated:
-    # E[ ||P_axis t||^2 ] is D_M.
-    # E[ ||P_tot t||^2 ] is roughly D_tot.
-    # We use the ratio mean(norm_proj_tot) / mean(norm_proj_axis) or similar?
-    # Let's stick to the simplest effective radius definition often used:
-    # R_M = sqrt( mean(norm_proj_axis) / mean(norm_proj_center) )
-    # But calculating proj_center is tricky because centers are correlated.
-    
-    # Alternative R_M calc from Algo 2 line 3531 (OCR is messy but implies ratio):
     # We will use the robust approximation: R_M = || s_1 ||_F / || s_0 ||_F (averaged)
     # This matches the intuition R ~ noise/signal.
     
     # Let's compute global norms directly from vectors for stability
-    # This is often more stable than the projection ratio for R_M
     norm_s1 = jnp.mean(jnp.sum(s_1**2, axis=-1)) # Mean squared norm of axes
     norm_s0 = jnp.mean(jnp.sum(s_0**2, axis=-1)) # Mean squared norm of centers
     R_M_val = jnp.sqrt(norm_s1 / (norm_s0 + 1e-9))
 
-    # Re-calculate D_M scaling:
-    # The projection norm on random t scales with N. 
-    # Since t ~ N(0, I), E[|v.t|^2] = ||v||^2.
-    # So D_M defined as E[proj] is actually summing the dimensions.
-    # We use the computed projection D_M.
-    
     # Capacity
     capacity = (1.0 + 1.0 / (R_M_val**2 + 1e-9)) / (D_M + 1e-9)
 
@@ -247,6 +218,8 @@ def run_manifold_geometry(representations, labels, n_samples_t=50, seed=42):
     
     # We vmap solve_single_anchor over the keys
     # Fix flat_manifolds, M, P, N as non-mapped arguments
+    # Since solve_single_anchor has static_argnums=(2,3,4), JAX will look at the 
+    # concrete values of M, P, N passed here and compile a specific version for them.
     solve_batch = jax.vmap(solve_single_anchor, in_axes=(0, None, None, None, None))
     
     # Run optimization
@@ -306,7 +279,7 @@ def analyze_manifold_trajectory(config, task_names):
                 
                 try:
                     # Run Analysis with 50 projections
-                    res = run_manifold_geometry(curr_reps, labels, n_samples_t=50)
+                    res = run_manifold_geometry(curr_reps, labels, n_samples_t=config.n_t)
                     for k in metric_names: step_res[k].append(res[k])
                 except Exception as e:
                     print(f"Error in manifold calc at step {step}: {e}")
