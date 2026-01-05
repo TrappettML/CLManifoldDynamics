@@ -34,6 +34,10 @@ def get_config():
     config.weight_decay = 0.0
     config.early_stopping = False
     config.patience = 50          
-    config.min_delta = 1e-4       
+    config.min_delta = 1e-4    
+
+    config.metric_type = 'acc'
+    config.m_integrator = 'final'
+
     
     return config

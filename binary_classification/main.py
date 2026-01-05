@@ -104,7 +104,7 @@ def main():
 
     # 4a. CL metrics
     cl_met_results = cl_metrics.compute_and_log_cl_metrics(
-        global_history, expert_histories, config, metric_type='acc'
+        global_history, expert_histories, config
     )
     print(f"{cl_met_results}")
 
