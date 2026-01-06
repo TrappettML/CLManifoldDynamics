@@ -1,27 +1,28 @@
 import ml_collections
 import os
 
-dataset = 'kmnist'
-
-def get_config():
+def get_config(dataset_name='kmnist'):
      config = ml_collections.ConfigDict()
 
-     # --- New: Algorithm Selector ---
+     # --- Algorithm Selector ---
      config.algorithm = 'SL'  # Options: 'SL', 'RL', 'UL', etc.
 
-     config.dataset_name = dataset
+     config.dataset_name = dataset_name
      config.seed = 42
      
-     # --- Directory Structure ---
-     # Create a root for this specific algorithm run (e.g., ./single_runs/SL)
-     # We upper() the algorithm name to ensure folder consistency.
+     # --- Directory Structure Refactor ---
+     # Root: ./single_runs/(ALGORITHM)/
      algo_dir = os.path.join("./single_runs", config.algorithm.upper())
      
      config.data_dir = "./data"
-     config.figures_dir = os.path.join(algo_dir, "figures")
-     config.reps_dir = os.path.join(algo_dir, "saved_representations")
+     # Plot output: ./single_runs/SL/plots/
+     config.figures_dir = os.path.join(algo_dir, "plots")
+     # Data output (reps, analysis pkls): ./single_runs/SL/data/
+     config.reps_dir = os.path.join(algo_dir, "data")
 
      config.num_tasks = 2
+     
+     # Note: The data loader forces grayscale, so input_dim is H*W
      down_sample = 15
      config.input_dim = int(down_sample**2) 
      config.downsample_dim = down_sample
@@ -45,10 +46,11 @@ def get_config():
      config.early_stopping = False
      config.patience = 50          
      config.min_delta = 1e-4    
+     
      # mandi variables
      config.mandi_samples = 50 
      config.n_t = 20
-     # 
+     
      config.metric_type = 'acc'
      config.m_integrator = 'final'
 
