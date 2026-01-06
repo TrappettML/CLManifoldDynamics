@@ -5,13 +5,15 @@ import jax
 import matplotlib.pyplot as plt
 import numpy as np
 import warnings
+import pickle
+
 import data_utils
 import config as config_module
 from learner import ContinualLearner
 import expert_trainer
 from hooks import CLHook
-import binary_classification.plastic_analysis as plastic_analysis
-import binary_classification.cl_analysis as cl_analysis  
+import plastic_analysis as plastic_analysis
+import cl_analysis as cl_analysis  
 import manifold_analysis
 
 
@@ -20,9 +22,9 @@ class LoggerHook(CLHook):
         print(f"[Hook] Starting Task ID {task.task_id}")
 
 def main():
+    config = config_module.get_config()
     print(f"Algorithm: {config.algorithm}")
     print(f"Using device: {jax.devices()}")
-    config = config_module.get_config()
     print(f"Configuration Loaded (Repeats={config.n_repeats}, LogFreq={config.log_frequency})")
     
     os.makedirs(config.reps_dir, exist_ok=True)
@@ -110,7 +112,6 @@ def main():
     cl_met_results = cl_analysis.compute_and_log_cl_metrics(
         global_history, expert_histories, config
     )
-    print(f"{cl_met_results}")
 
     # 5. Plotting
     print("\nGenerating Plots...")
@@ -244,7 +245,18 @@ def main():
     plastic_analysis.run_analysis_pipeline(config)
 
     # 7 Manifold Analysis
-    manifold_analysis.analyze_manifold_trajectory(config, task_names)
+    # 6. Manifold Analysis (Updated)
+    # Returns structured dict: {task: {metric: array(steps, repeats)}}
+    manifold_results = manifold_analysis.analyze_manifold_trajectory(config, task_names)
+    
+    # Save the full manifold metrics for downstream usage
+    if manifold_results:
+        manifold_save_path = os.path.join(config.figures_dir, f"manifold_metrics_full_{config.dataset_name}.pkl")
+        with open(manifold_save_path, 'wb') as f:
+            pickle.dump(manifold_results, f)
+        print(f"Full un-averaged manifold metrics saved to {manifold_save_path}")
+
+    print("\nDone.")
     
 if __name__ == "__main__":
     main()

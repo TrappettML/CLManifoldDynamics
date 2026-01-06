@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 from functools import partial
 from jax import flatten_util
-import algorithms  # Import the new module
+import algorithms 
 
 class ContinualLearner:
     def __init__(self, config, hooks=None):

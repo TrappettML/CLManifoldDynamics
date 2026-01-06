@@ -2,8 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from flax import traverse_util
-from models import TwoLayerMLP
-from binary_classification.algorithms import TrainState
+from models import TwoLayerMLP, TrainState
 
 class BaseAlgorithm:
     """Interface for learning algorithms."""
