@@ -1,6 +1,7 @@
 import ml_collections
+import os
 
-dataset = 'fashion_mnist'
+dataset = 'kmnist'
 
 def get_config():
      config = ml_collections.ConfigDict()
@@ -10,9 +11,15 @@ def get_config():
 
      config.dataset_name = dataset
      config.seed = 42
+     
+     # --- Directory Structure ---
+     # Create a root for this specific algorithm run (e.g., ./single_runs/SL)
+     # We upper() the algorithm name to ensure folder consistency.
+     algo_dir = os.path.join("./single_runs", config.algorithm.upper())
+     
      config.data_dir = "./data"
-     config.figures_dir = "./figures"
-     config.reps_dir = "./saved_representations"
+     config.figures_dir = os.path.join(algo_dir, "figures")
+     config.reps_dir = os.path.join(algo_dir, "saved_representations")
 
      config.num_tasks = 2
      down_sample = 15
