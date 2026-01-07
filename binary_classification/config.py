@@ -5,7 +5,7 @@ def get_config(dataset_name='kmnist'):
      config = ml_collections.ConfigDict()
 
      # --- Algorithm Selector ---
-     config.algorithm = 'SL'  # Options: 'SL', 'RL', 'UL', etc.
+     config.algorithm = 'RL'  # Options: 'SL', 'RL', 'UL', etc.
 
      config.dataset_name = dataset_name
      config.seed = 42
