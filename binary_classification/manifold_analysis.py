@@ -224,6 +224,17 @@ def analyze_manifold_trajectory(config, task_names):
         if labels.ndim > 1: labels = labels.flatten()
         
         n_steps, n_repeats, n_samples, dim = reps_data.shape
+        n_steps, n_repeats, n_samples, dim = reps_data.shape
+        
+        # The labels were flattened in single_run.py: (Samples * Repeats,)
+        # We must reshape them to (Samples, Repeats) to extract the correct column per repeat.
+        if labels.size == n_samples * n_repeats:
+            labels_reshaped = labels.reshape(n_samples, n_repeats)
+        else:
+            # Fallback for edge cases (e.g., if labels weren't flattened or dim=1)
+            print(f"Warning: Label shape mismatch (Got {labels.shape}, expected ({n_samples}, {n_repeats})). utilizing raw labels.")
+            labels_reshaped = labels.reshape(n_samples, -1) 
+        
         print(f"Processing {t_name}: {n_steps} steps, {n_repeats} repeats, {dim} dim...")
         
         # Storage for current task: metric -> list of steps (where each step is list of repeats)
@@ -234,13 +245,14 @@ def analyze_manifold_trajectory(config, task_names):
             
             for r in range(n_repeats):
                 curr_reps = reps_data[step, r]
+                curr_labels = labels_reshaped[:, r]
                 
                 if not np.isfinite(curr_reps).all():
                     for k in metric_names: step_res[k].append(np.nan)
                     continue
                 
                 try:
-                    res = run_manifold_geometry(curr_reps, labels, n_samples_t=config.n_t)
+                    res = run_manifold_geometry(curr_reps, curr_labels, n_samples_t=config.n_t)
                     for k in metric_names: step_res[k].append(res[k])
                 except Exception as e:
                     print(f"Error in manifold calc at step {step}: {e}")

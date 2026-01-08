@@ -35,7 +35,7 @@ def get_config(dataset_name, algorithm):
      # --- Optimization & Logging ---
      config.epochs_per_task = 1000
      config.log_frequency = 10 
-     config.n_repeats = 20
+     config.n_repeats = 30
      config.eval_freq = 10 
 
      if config.epochs_per_task % config.log_frequency != 0:
