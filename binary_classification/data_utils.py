@@ -14,6 +14,7 @@ DATASET_CONFIGS = {
     'kmnist': {'input_dim': 784, 'num_classes': 10, 'channels': 1},
     'fashion_mnist': {'input_dim': 784, 'num_classes': 10, 'channels': 1},
     'cifar100': {'input_dim': 3072, 'num_classes': 100, 'channels': 1},
+    'emnist': {'input_dim': 784, 'num_classes': 26, 'channels': 1},
 }
 
 class PatchedCIFAR100(datasets.CIFAR100):
@@ -53,7 +54,8 @@ DATASET_CLASS_MAP = {
     'mnist': datasets.MNIST,
     'kmnist': datasets.KMNIST,
     'fashion_mnist': datasets.FashionMNIST,
-    'cifar100': PatchedCIFAR100
+    'cifar100': PatchedCIFAR100,
+    'emnist': datasets.EMNIST,
 }
 
 class FilteredMappedDataset(Dataset):

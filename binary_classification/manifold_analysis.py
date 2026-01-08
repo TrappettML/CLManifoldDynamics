@@ -31,7 +31,7 @@ def solve_single_anchor(key, flat_manifolds, M, P, N):
     # So: -(y_i * point_j) . x <= 0
     y_expanded = jnp.repeat(y, M) # (P*M,)
     
-    # FIX 1: Negate G_mat to enforce positive margin (correct classification direction)
+    # Negate G_mat to enforce positive margin
     G_mat = -(y_expanded[:, None] * flat_manifolds) # (P*M, N)
     h_vec = jnp.zeros((P * M,))
     
@@ -55,9 +55,6 @@ def solve_single_anchor(key, flat_manifolds, M, P, N):
     # s_i_raw: The actual point on the manifold (weighted average of support vectors)
     s_i_raw = jnp.einsum('pm,pmn->pn', alphas, manifolds)
     
-    # s_i_aligned: The point flipped to lie in the positive cone (y_i * s_i)
-    # Note: We return raw anchors for geometry calculations to avoid zero-mean collapse.
-    
     return s_i_raw, t
 
 
@@ -65,64 +62,43 @@ def solve_single_anchor(key, flat_manifolds, M, P, N):
 def compute_metrics_from_anchors(anchors_raw, t_vectors):
     """
     Computes GLUE metrics.
-    
-    Args:
-        anchors_raw: (n_t, P, N) - The UNALIGNED anchor points on the manifolds.
-        t_vectors: (n_t, N)
     """
     n_t, P, N = anchors_raw.shape
     
     # --- 1. Decomposition into Centers and Axes ---
-    
-    # FIX 2: Use unaligned anchors to compute Centers.
-    # If we used aligned anchors, mean would be 0 (due to random y), causing Infinite Radius.
     s_0 = jnp.mean(anchors_raw, axis=0) # (P, N) - Manifold Centroids
     
     # Axis s^1: Deviation from center
     s_1 = anchors_raw - s_0[None, :, :]
     
     # --- 2. Gram Matrix Projections per sample k ---
-    
     def process_single_sample(s1_k, t_k):
-        """Calculates projection of t onto the axes subspace."""
         v_axis = s1_k @ t_k 
         G_axis = s1_k @ s1_k.T
-        
-        # Robust pseudo-inverse
         G_axis_inv = jnp.linalg.pinv(G_axis, rcond=1e-5)
-        
         norm_proj_axis_sq = v_axis.T @ G_axis_inv @ v_axis
         return norm_proj_axis_sq
 
-    # Vectorize over n_t samples
     norm_proj_axis_sq = jax.vmap(process_single_sample)(s_1, t_vectors)
     
     # --- 3. Aggregate Metrics ---
-    
-    # Manifold Dimension D_M = E[ || P_axes t ||^2 ]
     D_M = jnp.mean(norm_proj_axis_sq)
     
-    # Manifold Radius R_M
-    # R_M = Total Variation / Center Norm
     norm_s1 = jnp.mean(jnp.sum(s_1**2, axis=-1)) # Mean squared norm of axes
     norm_s0 = jnp.mean(jnp.sum(s_0**2, axis=-1)) # Mean squared norm of centers
     
-    # Avoid div by zero
     R_M_val = jnp.sqrt(norm_s1 / (norm_s0 + 1e-9))
 
     # Capacity Approximation Formula (Chung et al.)
     capacity = (1.0 + 1.0 / (R_M_val**2 + 1e-9)) / (D_M + 1e-9)
 
     # --- 4. Alignment Metrics ---
-    
-    # Center Alignment (rho_c)
     norms_0 = jnp.linalg.norm(s_0, axis=-1, keepdims=True)
     s_0_normed = s_0 / (norms_0 + 1e-9)
     cos_sim_0 = jnp.abs(s_0_normed @ s_0_normed.T)
     mask = 1.0 - jnp.eye(P)
     rho_c = jnp.sum(cos_sim_0 * mask) / (P * (P - 1))
     
-    # Axis Alignment (rho_a)
     def compute_axis_corr(s1_k):
         norms_1 = jnp.linalg.norm(s1_k, axis=-1, keepdims=True)
         s1_normed = s1_k / (norms_1 + 1e-9)
@@ -131,7 +107,6 @@ def compute_metrics_from_anchors(anchors_raw, t_vectors):
     
     rho_a = jnp.mean(jax.vmap(compute_axis_corr)(s_1))
     
-    # Center-Axis Alignment (psi)
     def compute_ca_corr(s1_k):
         norms_1 = jnp.linalg.norm(s1_k, axis=-1, keepdims=True)
         s1_normed = s1_k / (norms_1 + 1e-9)
@@ -149,11 +124,110 @@ def compute_metrics_from_anchors(anchors_raw, t_vectors):
         'Center_Axis_Alignment': psi
     }
 
+# --- Simulated Capacity Kernels (Algorithm 1) ---
+
+# FIX: Added '4' to static_argnums so P is treated as static.
+# indices: 0:key, 1:flat_manifolds, 2:n_proj, 3:M_per_manifold, 4:P
+@jax.jit(static_argnums=(2, 3, 4))
+def check_linear_separability_batch(key, flat_manifolds, n_proj, M_per_manifold, P):
+    """
+    Checks if randomly projected manifolds are linearly separable.
+    """
+    N_ambient = flat_manifolds.shape[1]
+    
+    # 1. Random Projection: Pi from R^N -> R^n
+    k1, k2 = jax.random.split(key)
+    Pi = jax.random.normal(k1, (N_ambient, n_proj)) / jnp.sqrt(n_proj)
+    
+    # Project data
+    projected_data = flat_manifolds @ Pi
+    
+    # 2. Random Dichotomy
+    # Requires P to be static to define shape (P,)
+    y = jax.random.choice(k2, jnp.array([-1.0, 1.0]), (P,))
+    y_expanded = jnp.repeat(y, M_per_manifold) # (P*M,)
+    
+    # 3. Solve Linear Separability (SVM-like feasibility)
+    G_mat = -(y_expanded[:, None] * projected_data) # (P*M, n)
+    h_vec = -jnp.ones((P * M_per_manifold,))
+    
+    Q_mat = jnp.eye(n_proj)
+    q_vec = jnp.zeros((n_proj,))
+    
+    # We use a loose tolerance because we just care about feasibility
+    osqp = OSQP(tol=1e-3, maxiter=1000, verbose=False, check_primal_infeasibility=True)
+    sol = osqp.run(params_obj=(Q_mat, q_vec), params_eq=None, params_ineq=(G_mat, h_vec))
+    
+    # Verify margin manually
+    w_opt = sol.params.primal
+    margins = y_expanded * (projected_data @ w_opt)
+    
+    # If minimum margin is >= 1 - epsilon, it is separable
+    is_separable = jnp.min(margins) >= 0.99 
+    
+    return is_separable
+
+def estimate_separability_probability(key, flat_manifolds, n_proj, M, P, m_trials=100):
+    """Estimates p_n: Probability that manifolds are separable in n dimensions."""
+    keys = jax.random.split(key, m_trials)
+    check_fn = lambda k: check_linear_separability_batch(k, flat_manifolds, n_proj, M, P)
+    results = jax.vmap(check_fn)(keys)
+    return jnp.mean(results.astype(jnp.float32))
+
+def compute_simulated_capacity(representations, labels, seed=42):
+    """
+    Implements the Binary Search algorithm (Algorithm 1) to find Simulated Capacity.
+    """
+    unique_labels = np.unique(labels)
+    P = len(unique_labels)
+    if P < 2: return np.nan
+    
+    # Organize data (ensure equal points M per manifold)
+    counts = [np.sum(labels == l) for l in unique_labels]
+    M = min(counts)
+    if M < 2: return np.nan
+    
+    grouped_data = []
+    for l in unique_labels:
+        idxs = np.where(labels == l)[0][:M]
+        grouped_data.append(representations[idxs])
+    
+    manifolds = np.stack(grouped_data) # (P, M, N)
+    flat_manifolds = jnp.array(manifolds.reshape(-1, manifolds.shape[-1]))
+    N_ambient = flat_manifolds.shape[1]
+    
+    # Binary Search for n*
+    # We want smallest n such that p_n >= 0.5
+    n_left = 1
+    n_right = N_ambient
+    n_star = N_ambient
+    
+    rng = jax.random.PRNGKey(seed)
+    
+    iteration = 0
+    while n_left <= n_right:
+        n_mid = (n_left + n_right) // 2
+        if n_mid == 0: n_mid = 1
+        
+        iter_key = jax.random.fold_in(rng, iteration)
+        p_n = estimate_separability_probability(iter_key, flat_manifolds, n_mid, M, P, m_trials=100)
+        
+        if p_n >= 0.5:
+            n_star = n_mid
+            n_right = n_mid - 1 
+        else:
+            n_left = n_mid + 1 
+            
+        iteration += 1
+        
+    alpha_sim = P / n_star
+    return float(alpha_sim)
+
+
 def run_manifold_geometry(representations, labels, n_samples_t=50, seed=42):
     """
-    Main entry point for computing manifold metrics.
+    Main entry point for computing manifold metrics (GLUE).
     """
-    # 1. Organize data into manifolds (P, M, N)
     unique_labels = np.unique(labels)
     P = len(unique_labels)
     N = representations.shape[1]
@@ -171,19 +245,12 @@ def run_manifold_geometry(representations, labels, n_samples_t=50, seed=42):
         grouped_data.append(representations[idxs])
     
     manifolds = np.stack(grouped_data)
-    manifolds_jax = jnp.array(manifolds)
-    flat_manifolds = manifolds_jax.reshape(-1, N)
+    flat_manifolds = jnp.array(manifolds.reshape(-1, N))
     
-    # 2. Batched Optimization
     key = jax.random.PRNGKey(seed)
     keys = jax.random.split(key, n_samples_t)
-    
     solve_batch = jax.vmap(solve_single_anchor, in_axes=(0, None, None, None, None))
-    
-    # Returns unaligned anchors
     s_raw, t_vecs = solve_batch(keys, flat_manifolds, M, P, N)
-    
-    # 3. Compute Metrics
     metrics_jax = compute_metrics_from_anchors(s_raw, t_vecs)
     
     return {k: float(v) for k, v in metrics_jax.items()}
@@ -193,20 +260,25 @@ def run_manifold_geometry(representations, labels, n_samples_t=50, seed=42):
 def analyze_manifold_trajectory(config, task_names):
     """
     Loads saved representations and computes manifold metrics over time.
-    Returns:
-        full_results (dict): A dictionary keyed by task_name.
-                             Each value is a dict of metrics: {metric: np.array(steps, repeats)}
+    Plots Sim Capacity on top of GLUE Capacity and calculates accuracy.
     """
     print("\n--- Starting Manifold Geometric Analysis (GLUE) ---")
     
-    metric_names = ['Capacity', 'Radius', 'Dimension', 
+    glue_metrics = ['Capacity', 'Radius', 'Dimension', 
                     'Center_Alignment', 'Axis_Alignment', 'Center_Axis_Alignment']
     
-    # Dictionary to store full un-averaged results per task
+    extra_metrics = ['Simulated_Capacity', 'Capacity_Relative_Error']
+    all_stored_metrics = glue_metrics + extra_metrics
+
+    # Dictionary to store full results per task
     full_results = {}
     
-    # For plotting aggregate history
-    plot_history = {k: [] for k in metric_names}
+    # For plotting aggregate history (only GLUE metrics)
+    plot_history = {k: [] for k in glue_metrics}
+    
+    # Store Simulated Capacity Results for Overlay
+    sim_cap_history = {}
+    
     task_boundaries = []
     current_epoch = 0
     
@@ -224,54 +296,102 @@ def analyze_manifold_trajectory(config, task_names):
         if labels.ndim > 1: labels = labels.flatten()
         
         n_steps, n_repeats, n_samples, dim = reps_data.shape
-        n_steps, n_repeats, n_samples, dim = reps_data.shape
         
-        # The labels were flattened in single_run.py: (Samples * Repeats,)
-        # We must reshape them to (Samples, Repeats) to extract the correct column per repeat.
         if labels.size == n_samples * n_repeats:
             labels_reshaped = labels.reshape(n_samples, n_repeats)
         else:
-            # Fallback for edge cases (e.g., if labels weren't flattened or dim=1)
-            print(f"Warning: Label shape mismatch (Got {labels.shape}, expected ({n_samples}, {n_repeats})). utilizing raw labels.")
             labels_reshaped = labels.reshape(n_samples, -1) 
         
-        print(f"Processing {t_name}: {n_steps} steps, {n_repeats} repeats, {dim} dim...")
+        print(f"Processing {t_name}: {n_steps} steps, {n_repeats} repeats...")
         
-        # Storage for current task: metric -> list of steps (where each step is list of repeats)
-        task_metrics_lists = {k: [] for k in metric_names}
+        # Storage for current task
+        task_metrics_lists = {k: [] for k in all_stored_metrics}
+        
+        # Temp storage for Sim Cap overlay
+        task_sim_epochs = []
+        task_sim_vals = [] 
         
         for step in range(n_steps):
-            step_res = {k: [] for k in metric_names}
+            epoch_num = current_epoch + (step + 1) * config.log_frequency
+            
+            # Temporary list for this step's repeats
+            step_res = {k: [] for k in all_stored_metrics}
+            
+            # Run Simulated Capacity every 100 epochs
+            run_sim_cap = (epoch_num % 100 == 0)
             
             for r in range(n_repeats):
                 curr_reps = reps_data[step, r]
                 curr_labels = labels_reshaped[:, r]
                 
+                # Check for NaNs in data
                 if not np.isfinite(curr_reps).all():
-                    for k in metric_names: step_res[k].append(np.nan)
+                    for k in all_stored_metrics: step_res[k].append(np.nan)
                     continue
                 
                 try:
+                    # 1. Standard GLUE Metrics
                     res = run_manifold_geometry(curr_reps, curr_labels, n_samples_t=config.n_t)
-                    for k in metric_names: step_res[k].append(res[k])
+                    for k in glue_metrics: step_res[k].append(res[k])
+                    
+                    # 2. Simulated Capacity & Accuracy
+                    if run_sim_cap:
+                        sc = compute_simulated_capacity(curr_reps, curr_labels)
+                        glue_cap = res['Capacity']
+                        
+                        # Calculate Relative Error
+                        if glue_cap > 1e-9:
+                            rel_error = abs(sc - glue_cap) / glue_cap
+                        else:
+                            rel_error = np.nan
+                            
+                        step_res['Simulated_Capacity'].append(sc)
+                        step_res['Capacity_Relative_Error'].append(rel_error)
+                    else:
+                        step_res['Simulated_Capacity'].append(np.nan)
+                        step_res['Capacity_Relative_Error'].append(np.nan)
+
                 except Exception as e:
-                    print(f"Error in manifold calc at step {step}: {e}")
-                    for k in metric_names: step_res[k].append(np.nan)
+                    print(f"Error at step {step} rep {r}: {e}")
+                    for k in all_stored_metrics: step_res[k].append(np.nan)
 
-            for k in metric_names:
+            # Store aggregated step data
+            for k in all_stored_metrics:
                 task_metrics_lists[k].append(step_res[k])
+                
+            # Logging & Overlay storage
+            if run_sim_cap:
+                sim_caps = np.array(step_res['Simulated_Capacity'])
+                rel_errs = np.array(step_res['Capacity_Relative_Error'])
+                
+                mean_sc = np.nanmean(sim_caps)
+                mean_err = np.nanmean(rel_errs)
+                
+                task_sim_epochs.append(epoch_num)
+                task_sim_vals.append(sim_caps)
+                
+                print(f"  [SimCap] Epoch {epoch_num}: Val {mean_sc:.3f} | Error vs GLUE: {mean_err:.2%}")
 
-        # Convert lists to arrays (Steps, Repeats) and store in full_results
+        # Finalize Task Data
         full_results[t_name] = {}
-        for k in metric_names:
-            arr_data = np.array(task_metrics_lists[k]) # Shape: (Steps, Repeats)
-            full_results[t_name][k] = arr_data
-            plot_history[k].extend(task_metrics_lists[k]) # Extend for plotting
+        for k in all_stored_metrics:
+            full_results[t_name][k] = np.array(task_metrics_lists[k])
+            
+        # Add to plotting history (only GLUE metrics)
+        for k in glue_metrics:
+            plot_history[k].extend(task_metrics_lists[k])
+            
+        # Process Sim Cap for overlay
+        if task_sim_epochs:
+            sim_vals_arr = np.array(task_sim_vals)
+            sim_means = np.nanmean(sim_vals_arr, axis=1)
+            sim_stds = np.nanstd(sim_vals_arr, axis=1)
+            sim_cap_history[t_name] = (task_sim_epochs, sim_means, sim_stds)
 
         current_epoch += n_steps * config.log_frequency
         task_boundaries.append(current_epoch)
 
-    # Convert plot history to numpy for plotting
+    # Convert plot history
     for k in plot_history:
         if len(plot_history[k]) > 0:
             plot_history[k] = np.array(plot_history[k]) 
@@ -281,18 +401,18 @@ def analyze_manifold_trajectory(config, task_names):
         print("No manifold metrics computed.")
         return full_results
 
-    n_metrics = len(metric_names)
+    n_metrics = len(glue_metrics)
     fig, axes = plt.subplots(n_metrics, 1, figsize=(10, 3 * n_metrics), sharex=True)
     if n_metrics == 1: axes = [axes]
     
-    total_steps = len(plot_history[metric_names[0]])
+    total_steps = len(plot_history[glue_metrics[0]])
     x_axis = np.arange(1, total_steps + 1) * config.log_frequency
     
     colors = plt.cm.viridis(np.linspace(0, 0.9, n_metrics))
     
-    for i, metric in enumerate(metric_names):
+    for i, metric in enumerate(glue_metrics):
         ax = axes[i]
-        data = plot_history[metric] # (Total_Steps, Repeats)
+        data = plot_history[metric]
         
         if data.size == 0: continue
             
@@ -300,8 +420,16 @@ def analyze_manifold_trajectory(config, task_names):
         std = np.nanstd(data, axis=1)
         
         color = colors[i]
-        ax.plot(x_axis, mean, label=metric, color=color, linewidth=2)
+        ax.plot(x_axis, mean, label=f"GLUE {metric}", color=color, linewidth=2)
         ax.fill_between(x_axis, mean - std, mean + std, color=color, alpha=0.2)
+        
+        # --- Overlay Simulated Capacity ---
+        if metric == 'Capacity':
+            for t_name, (epochs, means, stds) in sim_cap_history.items():
+                ax.errorbar(epochs, means, yerr=stds, fmt='o', color='black', 
+                            ecolor='gray', elinewidth=2, capsize=4, markersize=5,
+                            label='Simulated (Alg 1)' if t_name == task_names[0] else None)
+            ax.legend()
         
         ax.set_ylabel(metric)
         ax.grid(True, alpha=0.3)
@@ -310,7 +438,7 @@ def analyze_manifold_trajectory(config, task_names):
             ax.axvline(x=boundary, color='red', linestyle='--', alpha=0.6)
             
         if i == 0:
-            ax.set_title(f"Manifold Geometric Analysis (GLUE) - {config.dataset_name}")
+            ax.set_title(f"Manifold Geometric Analysis - {config.dataset_name}")
 
     axes[-1].set_xlabel('Epochs')
     plt.tight_layout()
