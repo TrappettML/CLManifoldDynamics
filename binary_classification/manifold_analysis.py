@@ -36,8 +36,8 @@ def solve_single_anchor(key, flat_manifolds, M, P, N):
     h_vec = jnp.zeros((P * M,))
     
     # OSQP Solver
-    osqp = OSQP(tol=1e-5, maxiter=4000, verbose=False)
-    sol = osqp.run(params_obj=(Q_mat, q_vec), params_eq=None, params_ineq=(G_mat, h_vec))
+    solver = OSQP(tol=1e-5, maxiter=4000, verbose=False)
+    sol = solver.run(params_obj=(Q_mat, q_vec), params_eq=None, params_ineq=(G_mat, h_vec))
     
     # 3. Recover Anchor Points s_i from Dual Variables
     z = sol.params.dual_ineq
@@ -126,7 +126,6 @@ def compute_metrics_from_anchors(anchors_raw, t_vectors):
 
 # --- Simulated Capacity Kernels (Algorithm 1) ---
 
-# FIX: Added '4' to static_argnums so P is treated as static.
 # indices: 0:key, 1:flat_manifolds, 2:n_proj, 3:M_per_manifold, 4:P
 @jax.jit(static_argnums=(2, 3, 4))
 def check_linear_separability_batch(key, flat_manifolds, n_proj, M_per_manifold, P):
@@ -155,8 +154,8 @@ def check_linear_separability_batch(key, flat_manifolds, n_proj, M_per_manifold,
     q_vec = jnp.zeros((n_proj,))
     
     # We use a loose tolerance because we just care about feasibility
-    osqp = OSQP(tol=1e-3, maxiter=1000, verbose=False, check_primal_infeasibility=True)
-    sol = osqp.run(params_obj=(Q_mat, q_vec), params_eq=None, params_ineq=(G_mat, h_vec))
+    solver = OSQP(tol=1e-3, maxiter=1000, verbose=False, check_primal_dual_infeasability=True)
+    sol = solver.run(params_obj=(Q_mat, q_vec), params_eq=None, params_ineq=(G_mat, h_vec))
     
     # Verify margin manually
     w_opt = sol.params.primal
@@ -167,7 +166,7 @@ def check_linear_separability_batch(key, flat_manifolds, n_proj, M_per_manifold,
     
     return is_separable
 
-def estimate_separability_probability(key, flat_manifolds, n_proj, M, P, m_trials=100):
+def estimate_separability_probability(key, flat_manifolds, n_proj, M: int, P: int, m_trials=100):
     """Estimates p_n: Probability that manifolds are separable in n dimensions."""
     keys = jax.random.split(key, m_trials)
     check_fn = lambda k: check_linear_separability_batch(k, flat_manifolds, n_proj, M, P)
@@ -210,7 +209,7 @@ def compute_simulated_capacity(representations, labels, seed=42):
         if n_mid == 0: n_mid = 1
         
         iter_key = jax.random.fold_in(rng, iteration)
-        p_n = estimate_separability_probability(iter_key, flat_manifolds, n_mid, M, P, m_trials=100)
+        p_n = estimate_separability_probability(iter_key, flat_manifolds, n_mid, int(M), int(P), m_trials=100)
         
         if p_n >= 0.5:
             n_star = n_mid
