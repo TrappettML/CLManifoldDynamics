@@ -29,7 +29,7 @@ def main():
         '--dataset', 
         type=str, 
         default='kmnist', 
-        choices=['kmnist', 'mnist', 'fashion_mnist', 'cifar100'],
+        choices=['kmnist', 'mnist', 'fashion_mnist', 'cifar100', 'emnist'],
         help="Dataset to use: kmnist, mnist, fashion_mnist, or cifar100"
     )
     parser.add_argument(

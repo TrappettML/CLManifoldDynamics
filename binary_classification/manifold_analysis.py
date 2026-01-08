@@ -153,7 +153,6 @@ def check_linear_separability_batch(key, flat_manifolds, n_proj, M_per_manifold,
     Q_mat = jnp.eye(n_proj)
     q_vec = jnp.zeros((n_proj,))
     
-    # We use a loose tolerance because we just care about feasibility
     solver = OSQP(tol=1e-3, maxiter=1000, verbose=False, check_primal_dual_infeasability=True)
     sol = solver.run(params_obj=(Q_mat, q_vec), params_eq=None, params_ineq=(G_mat, h_vec))
     

@@ -9,6 +9,7 @@ import warnings
 import jax.numpy as jnp
 
 # --- Dataset Metadata ---
+# num_classes defines the pool size for random sampling.
 DATASET_CONFIGS = {
     'mnist': {'input_dim': 784, 'num_classes': 10, 'channels': 1},
     'kmnist': {'input_dim': 784, 'num_classes': 10, 'channels': 1},
@@ -50,12 +51,22 @@ class PatchedCIFAR100(datasets.CIFAR100):
         self.data = np.vstack(self.data).reshape(-1, 3, 32, 32)
         self.data = self.data.transpose((0, 2, 3, 1))
 
+class PatchedEMNIST(datasets.EMNIST):
+    def __init__(self, root, train=True, transform=None, target_transform=None, download=False):
+        # EMNIST 'letters' split provides 26 classes (A-Z).
+        super().__init__(root, split='letters', train=train, transform=transform,
+                         target_transform=target_transform, download=download)
+        
+        # EMNIST Letters are inherently 1-based (1-26). 
+        # We shift them to 0-based (0-25) to align with standard indexing.
+        self.targets = self.targets - 1
+
 DATASET_CLASS_MAP = {
     'mnist': datasets.MNIST,
     'kmnist': datasets.KMNIST,
     'fashion_mnist': datasets.FashionMNIST,
     'cifar100': PatchedCIFAR100,
-    'emnist': datasets.EMNIST,
+    'emnist': PatchedEMNIST,
 }
 
 class FilteredMappedDataset(Dataset):
@@ -96,7 +107,6 @@ class MultiRepeatDataLoader:
         
         min_len = float('inf')
         
-        # print(f"    Loading data for {len(repeat_datasets)} repeats...")
         for ds in repeat_datasets:
             dl = DataLoader(ds, batch_size=len(ds), shuffle=False, num_workers=0)
             imgs, lbls = next(iter(dl))
@@ -122,13 +132,9 @@ class MultiRepeatDataLoader:
         for start_idx in range(0, self.n_samples, self.batch_size):
             end_idx = min(start_idx + self.batch_size, self.n_samples)
             
-            # If batch is empty, stop
             if start_idx >= end_idx:
                 break
                 
-            # Logic: If we are not in "bulk load" mode (where batch_size > n_samples),
-            # check for drop_last behavior. 
-            # If batch_size > n_samples, we are in analysis mode -> Yield everything.
             if self.batch_size < self.n_samples:
                  if end_idx - start_idx < self.batch_size:
                      continue
@@ -206,7 +212,6 @@ class VectorizedCLTask:
             
             per_repeat_datasets.append(ConcatDataset(class_datasets))
         
-        # NOTE: Using a large batch size effectively requests "all data at once"
         loader = MultiRepeatDataLoader(per_repeat_datasets, batch_size=999999, shuffle=False)
         return loader
 
@@ -218,17 +223,14 @@ def create_continual_tasks(config, split='train'):
     n_repeats = config.n_repeats
     rng = np.random.default_rng(config.seed)
 
-    classes_needed = config.num_tasks * 2
-    if classes_needed > total_classes:
-         raise ValueError(f"Too many tasks ({config.num_tasks}) for dataset {dataset_name}.")
-
     task_configs = [ [] for _ in range(config.num_tasks) ]
     
     for r in range(n_repeats):
-        perm = rng.choice(total_classes, size=classes_needed, replace=False)
         for t_i in range(config.num_tasks):
-            c0 = perm[t_i * 2]
-            c1 = perm[t_i * 2 + 1]
+            # Select 2 distinct classes from the FULL pool (0 to total_classes-1)
+            # This allows reuse of classes across tasks (e.g. Task 1: 0 vs 1, Task 2: 0 vs 2)
+            c0, c1 = rng.choice(total_classes, size=2, replace=False)
+            
             def_list = [
                 {'dataset': dataset_name, 'original_label': int(c0), 'binary_label': 0},
                 {'dataset': dataset_name, 'original_label': int(c1), 'binary_label': 1}
