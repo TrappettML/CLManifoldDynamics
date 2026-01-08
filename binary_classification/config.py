@@ -1,11 +1,11 @@
 import ml_collections
 import os
 
-def get_config(dataset_name='kmnist'):
+def get_config(dataset_name='kmnist', algorithm='SL'):
      config = ml_collections.ConfigDict()
 
      # --- Algorithm Selector ---
-     config.algorithm = 'RL'  # Options: 'SL', 'RL', 'UL', etc.
+     config.algorithm = algorithm  # Options: 'SL', 'RL', 'UL', etc.
 
      config.dataset_name = dataset_name
      config.seed = 42

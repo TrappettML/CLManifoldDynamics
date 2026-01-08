@@ -32,10 +32,17 @@ def main():
         choices=['kmnist', 'mnist', 'fashion_mnist', 'cifar100'],
         help="Dataset to use: kmnist, mnist, fashion_mnist, or cifar100"
     )
+    parser.add_argument(
+        '--algorithm', 
+        type=str, 
+        default='SL', 
+        choices=['SL', 'RL'],
+        help="Learning Algorithm: one of SL or RL, for now"
+    )
     args = parser.parse_args()
 
     # --- 2. Load Config with Dataset ---
-    config = config_module.get_config(args.dataset)
+    config = config_module.get_config(args.dataset, args.algorithm)
     
     print(f"Algorithm: {config.algorithm}")
     print(f"Dataset: {config.dataset_name}")
@@ -127,6 +134,17 @@ def main():
     cl_met_results = cl_analysis.compute_and_log_cl_metrics(
         global_history, expert_histories, config
     )
+
+    cl_save_path = os.path.join(config.reps_dir, f"cl_metrics_{config.dataset_name}.pkl")
+    with open(cl_save_path, 'wb') as f:
+        pickle.dump(cl_met_results, f)
+    print(f"CL Metrics saved to {cl_save_path}")
+
+    # --- 6b. Save raw loss/acc
+    history_save_path = os.path.join(config.reps_dir, f"global_history_{config.dataset_name}.pkl")
+    with open(history_save_path, 'wb') as f:
+        pickle.dump(global_history, f)
+    print(f"Global history saved to {history_save_path}")
 
     # --- 7. Plotting ---
     print("\nGenerating Plots...")

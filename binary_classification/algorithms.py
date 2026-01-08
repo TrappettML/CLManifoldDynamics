@@ -80,6 +80,7 @@ class SupervisedLearning(BaseAlgorithm):
         logits = state.apply_fn({'params': state.params}, images)
         loss = optax.sigmoid_binary_cross_entropy(logits, labels).mean()
         preds = (logits > 0).astype(jnp.float32)
+        jax.debug.breakpoint()
         acc = jnp.mean(preds == labels)
         return loss, acc
 
