@@ -10,29 +10,45 @@ class ContinualLearner:
         self.config = config
         self.hooks = hooks if hooks else []
         
-        # 1. Initialize Algorithm based on Config
         self.algo = algorithms.get_algorithm(config)
 
-        # 2. Initialize State via Algorithm
         rng = jax.random.key(config.seed)
         self.state = self.algo.init_vectorized_state(rng, config.input_dim)
         
         self._flat_fn = lambda p: flatten_util.ravel_pytree(p)[0]
 
     def preload_data(self, data_loader):
+        """
+        Consumes the MultiRepeatDataLoader.
+        Returns jnp.arrays of shape: (Total_Samples, Repeats, Dim)
+        """
+        # MultiRepeatDataLoader yields (Repeats, Batch, Dim)
+        # We want to concatenate along the Batch dimension (axis 1)
+        # resulting in (Repeats, Total_Samples, Dim)
+        
         images_list = []
         labels_list = []
+        
         for batch_imgs, batch_lbls in data_loader:
-            images_list.append(batch_imgs.numpy())
-            labels_list.append(batch_lbls.numpy())
+            images_list.append(batch_imgs) # (R, B, D)
+            labels_list.append(batch_lbls) # (R, B)
             
         if not images_list:
             raise ValueError("DataLoader returned no data.")
 
-        images = np.concatenate(images_list, axis=0)
-        labels = np.concatenate(labels_list, axis=0)
-        if labels.ndim == 1: labels = labels[..., None]
-            
+        # Concatenate along axis 1 (Batch dim)
+        images = np.concatenate(images_list, axis=1) # (R, Total, D)
+        labels = np.concatenate(labels_list, axis=1) # (R, Total)
+        
+        if labels.ndim == 2: labels = labels[..., None] # (R, Total, 1)
+
+        # IMPORTANT: The training loop (scan) iterates over Time.
+        # We need dim 0 to be Time (Samples/Batches) and dim 1 to be Repeats.
+        # Current: (Repeats, Total, ...) -> Swap to (Total, Repeats, ...)
+        
+        images = np.swapaxes(images, 0, 1)
+        labels = np.swapaxes(labels, 0, 1)
+
         return jnp.array(images), jnp.array(labels)
 
     def get_flat_params(self, state):
@@ -40,60 +56,90 @@ class ContinualLearner:
 
     @partial(jax.jit, static_argnums=(0,))
     def _train_epoch_jit(self, state, batch_images, batch_labels):
-        """Generic scan loop that delegates the update logic to self.algo.train_step"""
+        """
+        state: (Repeats, ...)
+        batch_images: (Batches, Repeats, B_Size, Dim) - Scanned over dim 0
+        batch_labels: (Batches, Repeats, B_Size, 1)
+        """
         
         def scan_fn(carry_state, batch_data):
-            # batch_data is (img, lbl)
-            new_state, metrics = self.algo.train_step(carry_state, batch_data)
+            # batch_data is a tuple of (img_slice, lbl_slice)
+            # img_slice shape: (Repeats, B_Size, Dim)
+            imgs, lbls = batch_data
+            
+            # We want to map over Repeats (dim 0)
+            # parallel_scan takes (single_state, single_batch_img, single_batch_lbl)
+            # vmap(..., in_axes=(0, 0, 0)) splits the state and the batch data by repeat
+            
+            def parallel_update(s, i, l):
+                return self.algo.train_step(s, (i, l))
+
+            step_update = jax.vmap(parallel_update, in_axes=(0, 0, 0))
+            new_state, metrics = step_update(carry_state, imgs, lbls)
+            
             return new_state, metrics
 
-        def parallel_scan(s, imgs, lbls):
-            return jax.lax.scan(scan_fn, s, (imgs, lbls))
-
-        # vmap over the repeats dimension
-        parallel_train = jax.vmap(parallel_scan, in_axes=(0, None, None))
-        final_state, (losses, accs) = parallel_train(state, batch_images, batch_labels)
+        # Scan over the Batches dimension
+        final_state, (losses, accs) = jax.lax.scan(scan_fn, state, (batch_images, batch_labels))
         
-        return final_state, jnp.mean(losses, axis=1), jnp.mean(accs, axis=1)
+        # losses shape: (Batches, Repeats)
+        return final_state, jnp.mean(losses, axis=0), jnp.mean(accs, axis=0)
 
     @partial(jax.jit, static_argnums=(0,))
     def _eval_jit(self, state, images, labels):
-        def eval_single(curr_state):
-            return self.algo.eval_step(curr_state, (images, labels))
+        # state: (Repeats, ...)
+        # images: (Total_Samples, Repeats, Dim) -> Need to reshuffle?
+        # Typically eval is done on full set.
+        # Eval logic: vmap over Repeats. Each repeat has its own State and its own Data (images[:, r, :])
+        
+        # Transpose images to (Repeats, Total_Samples, Dim) for vmap
+        images_t = jnp.swapaxes(images, 0, 1)
+        labels_t = jnp.swapaxes(labels, 0, 1)
+        
+        def eval_single(curr_state, curr_imgs, curr_lbls):
+            return self.algo.eval_step(curr_state, (curr_imgs, curr_lbls))
 
-        return jax.vmap(eval_single)(state)
+        # vmap over (State, Images, Labels)
+        return jax.vmap(eval_single, in_axes=(0, 0, 0))(state, images_t, labels_t)
 
     @partial(jax.jit, static_argnums=(0,))
     def _extract_features_jit(self, state, images):
-        if images.ndim == 4: 
-             images = images.reshape(-1, images.shape[-1])
+        # images: (Total, Repeats, Dim)
+        images_t = jnp.swapaxes(images, 0, 1)
         
-        def extract_single(curr_state):
-            return self.algo.get_features(curr_state, images)
+        if images_t.ndim == 4: 
+             images_t = images_t.reshape(images_t.shape[0], -1, images_t.shape[-1])
+        
+        def extract_single(curr_state, curr_imgs):
+            return self.algo.get_features(curr_state, curr_imgs)
 
-        return jax.vmap(extract_single)(state)
+        return jax.vmap(extract_single, in_axes=(0, 0))(state, images_t)
 
     def train_task(self, task, test_streams, global_history, analysis_subset=None):
-        # NOTE: This method remains largely the same, as it orchestrates data loading 
-        # and the high-level loop, which is common across most CL setups.
-        
-        print(f"--- CL Training on {task.name} (Algo: {self.config.algorithm}) ---")
+        print(f"--- CL Training on {task.name} ---")
         
         for h in self.hooks: h.on_task_start(task, self.state)
 
-        # 1. Load Data
+        # 1. Load Data (Now returns [Total, Repeats, Dim])
         train_loader = task.load_data()
         train_imgs_raw, train_lbls_raw = self.preload_data(train_loader)
         
-        n_samples = train_imgs_raw.shape[0]
+        # Reshape for Scan: (Batches, Repeats, Batch_Size, Dim)
+        # train_imgs_raw is (Total, Repeats, Dim)
+        n_samples = train_imgs_raw.shape[0] # Total samples (min length across repeats)
         batches_per_epoch = n_samples // self.config.batch_size
         limit = batches_per_epoch * self.config.batch_size
-        train_imgs_raw = train_imgs_raw[:limit]
-        train_lbls_raw = train_lbls_raw[:limit]
-
-        epoch_data_imgs = train_imgs_raw.reshape(batches_per_epoch, self.config.batch_size, -1)
-        epoch_data_lbls = train_lbls_raw.reshape(batches_per_epoch, self.config.batch_size, -1)
         
+        train_imgs = train_imgs_raw[:limit]
+        train_lbls = train_lbls_raw[:limit]
+
+        # Reshape: (Batches, B_Size, Repeats, Dim) -> Swap to (Batches, Repeats, B_Size, Dim)
+        epoch_data_imgs = train_imgs.reshape(batches_per_epoch, self.config.batch_size, self.config.n_repeats, -1)
+        epoch_data_imgs = jnp.swapaxes(epoch_data_imgs, 1, 2)
+        
+        epoch_data_lbls = train_lbls.reshape(batches_per_epoch, self.config.batch_size, self.config.n_repeats, -1)
+        epoch_data_lbls = jnp.swapaxes(epoch_data_lbls, 1, 2)
+
         epoch_data_imgs = jax.device_put(epoch_data_imgs)
         epoch_data_lbls = jax.device_put(epoch_data_lbls)
 
@@ -101,8 +147,7 @@ class ContinualLearner:
         analysis_imgs = None
         if analysis_subset:
             analysis_imgs, _ = self.preload_data(analysis_subset)
-            if analysis_imgs.ndim > 2:
-                analysis_imgs = analysis_imgs.reshape(-1, analysis_imgs.shape[-1])
+            # analysis_imgs is (Total, Repeats, Dim) -> OK for _extract_features_jit
 
         # 3. Test Data Cache
         if not hasattr(self, 'cached_test_data'):
@@ -120,7 +165,6 @@ class ContinualLearner:
             
             def inner_loop(carry, _):
                 curr_state = carry
-                # _train_epoch_jit now uses self.algo internally
                 new_state, tr_loss, tr_acc = self._train_epoch_jit(curr_state, epoch_data_imgs, epoch_data_lbls)
                 return new_state, (tr_loss, tr_acc)
 
@@ -130,6 +174,7 @@ class ContinualLearner:
                     inner_loop, state_start, None, length=log_freq
                 )
                 
+                # Eval
                 def run_eval(s):
                     results = {}
                     for t_name in sorted(test_data_jax.keys()):
@@ -143,6 +188,9 @@ class ContinualLearner:
                 
                 if analysis_imgs is not None:
                     reps = self._extract_features_jit(state_end, analysis_imgs)
+                    # Result: (Repeats, Samples, Dim)
+                    # We usually want (Samples, Repeats, Dim) for analysis pipeline
+                    reps = jnp.swapaxes(reps, 0, 1)
                 else:
                     reps = jnp.zeros((1,))
 
@@ -161,9 +209,10 @@ class ContinualLearner:
 
         self.state, history_tree = nested_task_scan(self.state)
 
-        # Post-processing (converting to numpy, handling logs) remains the same
+        # Post-processing
         history_np = jax.tree_util.tree_map(np.array, history_tree)
         
+        # tr_loss shape: (Outer, Inner, Repeats) -> (Total_Epochs, Repeats)
         tr_loss_dense = history_np['tr_loss'].reshape(-1, self.config.n_repeats)
         tr_acc_dense = history_np['tr_acc'].reshape(-1, self.config.n_repeats)
         global_history['train_loss'].extend(tr_loss_dense)

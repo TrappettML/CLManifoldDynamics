@@ -1,7 +1,7 @@
 import ml_collections
 import os
 
-def get_config(dataset_name='kmnist', algorithm='SL'):
+def get_config(dataset_name, algorithm):
      config = ml_collections.ConfigDict()
 
      # --- Algorithm Selector ---
