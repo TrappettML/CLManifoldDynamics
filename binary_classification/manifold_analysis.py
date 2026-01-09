@@ -1,18 +1,17 @@
 import jax
 import jax.numpy as jnp
 from jaxopt import OSQP
-import numpy as np
 import matplotlib.pyplot as plt
 import os
-from ipdb import set_trace
-
-# Ensure we use 64-bit precision for stability in geometric projections
-jax.config.update("jax_enable_x64", True)
 
 # --- JAX-JIT Compiled Optimization Kernels ---
 
 @jax.jit(static_argnums=(2, 3, 4))
 def solve_single_anchor(key, flat_manifolds, M, P, N):
+    """
+    Solves for a single anchor point (s_i) and direction (t).
+    Pure JAX implementation of the dual SVM problem.
+    """
     # 1. Sample direction t and dichotomy y
     key, t_key, y_key = jax.random.split(key, 3)
     
@@ -62,7 +61,7 @@ def solve_single_anchor(key, flat_manifolds, M, P, N):
 @jax.jit
 def compute_metrics_from_anchors(anchors_raw, t_vectors):
     """
-    Computes GLUE metrics.
+    Computes GLUE metrics from the solved anchor points.
     """
     n_t, P, N = anchors_raw.shape
     
@@ -151,7 +150,6 @@ def check_linear_separability_batch(key, flat_manifolds, n_proj, M_per_manifold,
     projected_data = flat_manifolds @ Pi
     
     # 2. Random Dichotomy
-    # Requires P to be static to define shape (P,)
     y = jax.random.choice(k2, jnp.array([-1.0, 1.0]), (P,))
     y_expanded = jnp.repeat(y, M_per_manifold) # (P*M,)
     
@@ -180,51 +178,57 @@ def estimate_separability_probability(key, flat_manifolds, n_proj, M: int, P: in
     results = jax.vmap(check_fn)(keys)
     return jnp.mean(results.astype(jnp.float32))
 
-def compute_simulated_capacity(representations, labels, seed=42):
+def compute_simulated_capacity(rng, representations, labels):
     """
     Implements the Binary Search algorithm (Algorithm 1) to find Simulated Capacity.
+    Fully uses JAX for random keys and array manipulation.
     """
-    unique_labels = np.unique(labels)
-    P = len(unique_labels)
-    if P < 2: return np.nan
+    # Eager execution for data organization (dynamic shapes)
+    unique_labels = jnp.unique(labels)
+    P = unique_labels.shape[0]
+    
+    if P < 2: return jnp.nan
     
     # Organize data (ensure equal points M per manifold)
-    counts = [np.sum(labels == l) for l in unique_labels]
-    M = min(counts)
-    if M < 2: return np.nan
+    counts = jnp.array([jnp.sum(labels == l) for l in unique_labels])
+    M = int(jnp.min(counts))
+    
+    if M < 2: return jnp.nan
     
     grouped_data = []
-    for l in unique_labels:
-        idxs = np.where(labels == l)[0][:M]
+    # Loop over classes in standard python, but operations are JAX
+    for i in range(P):
+        l = unique_labels[i]
+        # Boolean masking returns dynamic shape, handled by JAX eager execution
+        idxs = jnp.where(labels == l)[0][:M]
         grouped_data.append(representations[idxs])
     
-    manifolds = np.stack(grouped_data) # (P, M, N)
-    flat_manifolds = jnp.array(manifolds.reshape(-1, manifolds.shape[-1]))
+    manifolds = jnp.stack(grouped_data) # (P, M, N)
+    flat_manifolds = manifolds.reshape(-1, manifolds.shape[-1])
     N_ambient = flat_manifolds.shape[1]
 
-        # ADD DIAGNOSTIC: Print representation statistics
-    rep_mean = np.mean(representations)
-    rep_std = np.std(representations)
-    rep_norm = np.linalg.norm(representations)
-    # print(f"[DEBUG SimCap] Rep stats: mean={rep_mean:.4f}, std={rep_std:.4f}, norm={rep_norm:.4f}")
-    
     # Binary Search for n*
     # We want smallest n such that p_n >= 0.5
     n_left = 1
     n_right = N_ambient
     n_star = N_ambient
     
-    rng = jax.random.PRNGKey(seed)
-    
     iteration = 0
     while n_left <= n_right:
         n_mid = (n_left + n_right) // 2
         if n_mid == 0: n_mid = 1
         
-        iter_key = jax.random.fold_in(rng, iteration)
-        p_n = estimate_separability_probability(iter_key, flat_manifolds, n_mid, int(M), int(P), m_trials=100)
-        # ADD DIAGNOSTIC: Print search progress
-        # print(f"[DEBUG SimCap] Iter {iteration}: n_mid={n_mid}, p_n={p_n:.4f}, n_star={n_star}")
+        # Split key for this iteration's trials
+        rng, iter_key = jax.random.split(rng)
+        
+        p_n = estimate_separability_probability(
+            iter_key, 
+            flat_manifolds, 
+            int(n_mid), 
+            int(M), 
+            int(P), 
+            m_trials=100
+        )
         
         if p_n >= 0.5:
             n_star = n_mid
@@ -235,41 +239,44 @@ def compute_simulated_capacity(representations, labels, seed=42):
         iteration += 1
         
     alpha_sim = P / n_star
-    # print(f"[DEBUG SimCap] Final: n_star={n_star}, alpha_sim={alpha_sim:.4f}")
     return float(alpha_sim)
 
 
-def run_manifold_geometry(representations, labels, n_samples_t=50, seed=42):
+def run_manifold_geometry(rng, representations, labels, n_samples_t=50):
     """
     Main entry point for computing manifold metrics (GLUE).
     """
-    if not np.isfinite(representations).all():
+    # Check for NaNs
+    if not jnp.all(jnp.isfinite(representations)):
         print("Warning: NaN or Inf detected in representations")
-        return {k: np.nan for k in ['Capacity', 'Radius', 'Dimension', 
+        return {k: jnp.nan for k in ['Capacity', 'Radius', 'Dimension', 
                                    'Center_Alignment', 'Axis_Alignment', 'Center_Axis_Alignment']}
     
-    unique_labels = np.unique(labels)
-    P = len(unique_labels)
+    unique_labels = jnp.unique(labels)
+    P = unique_labels.shape[0]
     N = representations.shape[1]
     
-    counts = [np.sum(labels == l) for l in unique_labels]
-    M = min(counts)
+    counts = jnp.array([jnp.sum(labels == l) for l in unique_labels])
+    M = int(jnp.min(counts))
     
     if M < 2:
-        return {k: np.nan for k in ['Capacity', 'Radius', 'Dimension', 
+        return {k: jnp.nan for k in ['Capacity', 'Radius', 'Dimension', 
                                    'Center_Alignment', 'Axis_Alignment', 'Center_Axis_Alignment']}
 
     grouped_data = []
-    for l in unique_labels:
-        idxs = np.where(labels == l)[0][:M]
+    for i in range(P):
+        l = unique_labels[i]
+        idxs = jnp.where(labels == l)[0][:M]
         grouped_data.append(representations[idxs])
     
-    manifolds = np.stack(grouped_data)
-    flat_manifolds = jnp.array(manifolds.reshape(-1, N))
+    manifolds = jnp.stack(grouped_data)
+    flat_manifolds = manifolds.reshape(-1, N)
     
-    key = jax.random.PRNGKey(seed)
-    keys = jax.random.split(key, n_samples_t)
+    # Generate keys for the solver
+    keys = jax.random.split(rng, n_samples_t)
     solve_batch = jax.vmap(solve_single_anchor, in_axes=(0, None, None, None, None))
+    
+    # Run Solver
     s_raw, t_vecs = solve_batch(keys, flat_manifolds, M, P, N)
     metrics_jax = compute_metrics_from_anchors(s_raw, t_vecs)
     
@@ -280,10 +287,13 @@ def run_manifold_geometry(representations, labels, n_samples_t=50, seed=42):
 def analyze_manifold_trajectory(config, task_names):
     """
     Loads saved representations and computes manifold metrics over time.
-    Plots Sim Capacity on top of GLUE Capacity and calculates accuracy.
+    Uses JAX for all computations and key management.
     """
-    print("\n--- Starting Manifold Geometric Analysis (GLUE) ---")
+    print("\n--- Starting Manifold Geometric Analysis (GLUE) [JAX Backend] ---")
     
+    # Initialize the master key from config seed
+    master_key = jax.random.PRNGKey(config.seed)
+
     glue_metrics = ['Capacity', 'Radius', 'Dimension', 
                     'Center_Alignment', 'Axis_Alignment', 'Center_Axis_Alignment']
     
@@ -302,7 +312,7 @@ def analyze_manifold_trajectory(config, task_names):
     task_boundaries = []
     current_epoch = 0
     
-    for t_name in task_names:
+    for t_idx, t_name in enumerate(task_names):
         rep_path = os.path.join(config.reps_dir, f"{t_name}_reps_per_epoch.npy")
         lbl_path = os.path.join(config.reps_dir, f"{t_name}_labels.npy")
         
@@ -310,8 +320,11 @@ def analyze_manifold_trajectory(config, task_names):
             print(f"Skipping {t_name} (files not found)")
             continue
             
-        reps_data = np.load(rep_path) 
-        labels = np.load(lbl_path)    
+        # Load using JAX (via numpy then convert)
+        with open(rep_path, 'rb') as f:
+            reps_data = jnp.load(f)
+        with open(lbl_path, 'rb') as f:
+            labels = jnp.load(f)    
         
         if labels.ndim > 1: labels = labels.flatten()
         
@@ -341,39 +354,48 @@ def analyze_manifold_trajectory(config, task_names):
             run_sim_cap = (epoch_num % 100 == 0)
             
             for r in range(n_repeats):
+                # Fold key for specific Step and Repeat to ensure uniqueness and reproducibility
+                # Key structure: Master -> Task -> Step -> Repeat
+                step_key = jax.random.fold_in(master_key, t_idx)
+                step_key = jax.random.fold_in(step_key, step)
+                unique_key = jax.random.fold_in(step_key, r)
+                
+                # Split key for separate sub-routines (GLUE vs SimCap)
+                glue_key, sim_key = jax.random.split(unique_key)
+                
                 curr_reps = reps_data[step, r]
                 curr_labels = labels_reshaped[:, r]
                 
                 # Check for NaNs in data
-                if not np.isfinite(curr_reps).all():
-                    for k in all_stored_metrics: step_res[k].append(np.nan)
+                if not jnp.all(jnp.isfinite(curr_reps)):
+                    for k in all_stored_metrics: step_res[k].append(jnp.nan)
                     continue
                 
                 try:
                     # 1. Standard GLUE Metrics
-                    res = run_manifold_geometry(curr_reps, curr_labels, n_samples_t=config.n_t)
+                    res = run_manifold_geometry(glue_key, curr_reps, curr_labels, n_samples_t=config.n_t)
                     for k in glue_metrics: step_res[k].append(res[k])
                     
                     # 2. Simulated Capacity & Accuracy
                     if run_sim_cap:
-                        sc = compute_simulated_capacity(curr_reps, curr_labels, seed=42 + step * n_repeats + r)
+                        sc = compute_simulated_capacity(sim_key, curr_reps, curr_labels)
                         glue_cap = res['Capacity']
                         
                         # Calculate Relative Error
                         if glue_cap > 1e-9:
                             rel_error = abs(sc - glue_cap) / glue_cap
                         else:
-                            rel_error = np.nan
+                            rel_error = jnp.nan
                             
                         step_res['Simulated_Capacity'].append(sc)
                         step_res['Capacity_Relative_Error'].append(rel_error)
                     else:
-                        step_res['Simulated_Capacity'].append(np.nan)
-                        step_res['Capacity_Relative_Error'].append(np.nan)
+                        step_res['Simulated_Capacity'].append(jnp.nan)
+                        step_res['Capacity_Relative_Error'].append(jnp.nan)
 
                 except Exception as e:
                     print(f"Error at step {step} rep {r}: {e}")
-                    for k in all_stored_metrics: step_res[k].append(np.nan)
+                    for k in all_stored_metrics: step_res[k].append(jnp.nan)
 
             # Store aggregated step data
             for k in all_stored_metrics:
@@ -381,21 +403,16 @@ def analyze_manifold_trajectory(config, task_names):
                 
             # Logging & Overlay storage
             if run_sim_cap:
-                sim_caps = np.array(step_res['Simulated_Capacity'])
-                rel_errs = np.array(step_res['Capacity_Relative_Error'])
+                sim_caps = jnp.array(step_res['Simulated_Capacity'])
                 
-                mean_sc = np.nanmean(sim_caps)
-                mean_err = np.nanmean(rel_errs)
-                
+                # Note: We use jnp.nanmean
                 task_sim_epochs.append(epoch_num)
                 task_sim_vals.append(sim_caps)
-                
-                # print(f"  [SimCap] Epoch {epoch_num}: Val {mean_sc:.3f} | Error vs GLUE: {mean_err:.2%}")
 
         # Finalize Task Data
         full_results[t_name] = {}
         for k in all_stored_metrics:
-            full_results[t_name][k] = np.array(task_metrics_lists[k])
+            full_results[t_name][k] = jnp.array(task_metrics_lists[k])
             
         # Add to plotting history (only GLUE metrics)
         for k in glue_metrics:
@@ -403,18 +420,19 @@ def analyze_manifold_trajectory(config, task_names):
             
         # Process Sim Cap for overlay
         if task_sim_epochs:
-            sim_vals_arr = np.array(task_sim_vals)
-            sim_means = np.nanmean(sim_vals_arr, axis=1)
-            sim_stds = np.nanstd(sim_vals_arr, axis=1)
+            sim_vals_arr = jnp.array(task_sim_vals)
+            sim_means = jnp.nanmean(sim_vals_arr, axis=1)
+            sim_stds = jnp.nanstd(sim_vals_arr, axis=1)
             sim_cap_history[t_name] = (task_sim_epochs, sim_means, sim_stds)
 
         current_epoch += n_steps * config.log_frequency
         task_boundaries.append(current_epoch)
 
-    # Convert plot history
+    # Convert plot history to simple arrays for matplotlib
+    # Note: We must convert JAX arrays to Numpy for Matplotlib
     for k in plot_history:
         if len(plot_history[k]) > 0:
-            plot_history[k] = np.array(plot_history[k]) 
+            plot_history[k] = jnp.array(plot_history[k]) 
 
     # --- Plotting ---
     if len(plot_history['Capacity']) == 0:
@@ -426,9 +444,9 @@ def analyze_manifold_trajectory(config, task_names):
     if n_metrics == 1: axes = [axes]
     
     total_steps = len(plot_history[glue_metrics[0]])
-    x_axis = np.arange(1, total_steps + 1) * config.log_frequency
+    x_axis = jnp.arange(1, total_steps + 1) * config.log_frequency
     
-    colors = plt.cm.viridis(np.linspace(0, 0.9, n_metrics))
+    colors = plt.cm.viridis(jnp.linspace(0, 0.9, n_metrics))
     
     for i, metric in enumerate(glue_metrics):
         ax = axes[i]
@@ -436,8 +454,8 @@ def analyze_manifold_trajectory(config, task_names):
         
         if data.size == 0: continue
             
-        mean = np.nanmean(data, axis=1)
-        std = np.nanstd(data, axis=1)
+        mean = jnp.nanmean(data, axis=1)
+        std = jnp.nanstd(data, axis=1)
         
         color = colors[i]
         ax.plot(x_axis, mean, label=f"GLUE {metric}", color=color, linewidth=2)
