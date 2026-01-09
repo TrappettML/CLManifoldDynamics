@@ -11,10 +11,10 @@ import argparse
 import data_utils
 import config as config_module
 from learner import ContinualLearner
-import expert_trainer
+from expert_trainer import train_single_expert
 from hooks import CLHook
-import plastic_analysis as plastic_analysis
-import cl_analysis as cl_analysis  
+import plastic_analysis
+import cl_analysis 
 import manifold_analysis
 
 
@@ -28,8 +28,8 @@ def main():
     parser.add_argument(
         '--dataset', 
         type=str, 
-        default='kmnist', 
-        choices=['kmnist', 'mnist', 'fashion_mnist', 'cifar100', 'emnist'],
+        default='mnist', 
+        choices=['kmnist', 'mnist', 'fashion_mnist', 'emnist'],
         help="Dataset to use: kmnist, mnist, fashion_mnist, or cifar100"
     )
     parser.add_argument(
@@ -106,13 +106,15 @@ def main():
         total_epochs += config.epochs_per_task
         task_boundaries.append(total_epochs)
 
+    learner.clear_test_cache()
+
     # --- 6. Expert Baselines ---
     expert_stats = {} 
     expert_histories = {} 
     
     print("\n--- Computing Expert Baselines ---")
     for task in train_tasks:
-        _, _, _, _, exp_l, exp_acc = expert_trainer.train_single_expert(
+        _, _, _, _, exp_l, exp_acc = train_single_expert(
             config, task, test_streams[task.name]
         )
         

@@ -4,6 +4,7 @@ from jaxopt import OSQP
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+from ipdb import set_trace
 
 # Ensure we use 64-bit precision for stability in geometric projections
 jax.config.update("jax_enable_x64", True)
@@ -90,7 +91,15 @@ def compute_metrics_from_anchors(anchors_raw, t_vectors):
     R_M_val = jnp.sqrt(norm_s1 / (norm_s0 + 1e-9))
 
     # Capacity Approximation Formula (Chung et al.)
-    capacity = (1.0 + 1.0 / (R_M_val**2 + 1e-9)) / (D_M + 1e-9)
+    def compute_capacity(r, d):
+        return (1.0 + 1.0 / (r**2)) / d
+    
+    def return_nan(r, d):
+        return jnp.nan
+    
+    # Check if metrics are valid (not too small, not NaN)
+    is_valid = (R_M_val > 1e-6) & (D_M > 1e-6) & jnp.isfinite(R_M_val) & jnp.isfinite(D_M)
+    capacity = jax.lax.cond(is_valid, compute_capacity, return_nan, R_M_val, D_M)
 
     # --- 4. Alignment Metrics ---
     norms_0 = jnp.linalg.norm(s_0, axis=-1, keepdims=True)
@@ -162,7 +171,6 @@ def check_linear_separability_batch(key, flat_manifolds, n_proj, M_per_manifold,
     
     # If minimum margin is >= 1 - epsilon, it is separable
     is_separable = jnp.min(margins) >= 0.99 
-    
     return is_separable
 
 def estimate_separability_probability(key, flat_manifolds, n_proj, M: int, P: int, m_trials=100):
@@ -193,6 +201,12 @@ def compute_simulated_capacity(representations, labels, seed=42):
     manifolds = np.stack(grouped_data) # (P, M, N)
     flat_manifolds = jnp.array(manifolds.reshape(-1, manifolds.shape[-1]))
     N_ambient = flat_manifolds.shape[1]
+
+        # ADD DIAGNOSTIC: Print representation statistics
+    rep_mean = np.mean(representations)
+    rep_std = np.std(representations)
+    rep_norm = np.linalg.norm(representations)
+    # print(f"[DEBUG SimCap] Rep stats: mean={rep_mean:.4f}, std={rep_std:.4f}, norm={rep_norm:.4f}")
     
     # Binary Search for n*
     # We want smallest n such that p_n >= 0.5
@@ -209,6 +223,8 @@ def compute_simulated_capacity(representations, labels, seed=42):
         
         iter_key = jax.random.fold_in(rng, iteration)
         p_n = estimate_separability_probability(iter_key, flat_manifolds, n_mid, int(M), int(P), m_trials=100)
+        # ADD DIAGNOSTIC: Print search progress
+        # print(f"[DEBUG SimCap] Iter {iteration}: n_mid={n_mid}, p_n={p_n:.4f}, n_star={n_star}")
         
         if p_n >= 0.5:
             n_star = n_mid
@@ -219,6 +235,7 @@ def compute_simulated_capacity(representations, labels, seed=42):
         iteration += 1
         
     alpha_sim = P / n_star
+    # print(f"[DEBUG SimCap] Final: n_star={n_star}, alpha_sim={alpha_sim:.4f}")
     return float(alpha_sim)
 
 
@@ -226,6 +243,11 @@ def run_manifold_geometry(representations, labels, n_samples_t=50, seed=42):
     """
     Main entry point for computing manifold metrics (GLUE).
     """
+    if not np.isfinite(representations).all():
+        print("Warning: NaN or Inf detected in representations")
+        return {k: np.nan for k in ['Capacity', 'Radius', 'Dimension', 
+                                   'Center_Alignment', 'Axis_Alignment', 'Center_Axis_Alignment']}
+    
     unique_labels = np.unique(labels)
     P = len(unique_labels)
     N = representations.shape[1]
@@ -334,7 +356,7 @@ def analyze_manifold_trajectory(config, task_names):
                     
                     # 2. Simulated Capacity & Accuracy
                     if run_sim_cap:
-                        sc = compute_simulated_capacity(curr_reps, curr_labels)
+                        sc = compute_simulated_capacity(curr_reps, curr_labels, seed=42 + step * n_repeats + r)
                         glue_cap = res['Capacity']
                         
                         # Calculate Relative Error
@@ -368,7 +390,7 @@ def analyze_manifold_trajectory(config, task_names):
                 task_sim_epochs.append(epoch_num)
                 task_sim_vals.append(sim_caps)
                 
-                print(f"  [SimCap] Epoch {epoch_num}: Val {mean_sc:.3f} | Error vs GLUE: {mean_err:.2%}")
+                # print(f"  [SimCap] Epoch {epoch_num}: Val {mean_sc:.3f} | Error vs GLUE: {mean_err:.2%}")
 
         # Finalize Task Data
         full_results[t_name] = {}

@@ -238,3 +238,8 @@ class ContinualLearner:
         for h in self.hooks: h.on_task_end(task, self.state, metrics=None)
         
         return rep_history, weight_history
+    
+    def clear_test_cache(self):
+        """Clear cached test data to free memory."""
+        if hasattr(self, 'cached_test_data'):
+            self.cached_test_data.clear()
