@@ -325,14 +325,20 @@ def analyze_manifold_trajectory(config, task_names):
         with open(lbl_path, 'rb') as f:
             labels = jnp.load(f)    
         
-        if labels.ndim > 1: labels = labels.flatten()
-        
+        # Expecting reps_data: (Steps, Repeats, Samples, Dim)
         n_steps, n_repeats, n_samples, dim = reps_data.shape
         
-        if labels.size == n_samples * n_repeats:
-            labels_reshaped = labels.reshape(n_samples, n_repeats)
+        # Asserts for system integrity
+        assert n_repeats == config.n_repeats, f"Config repeats {config.n_repeats} mismatch data {n_repeats}"
+        
+        # Handle Labels: Expect (Samples, Repeats) from single_run
+        if labels.ndim == 2:
+            assert labels.shape == (n_samples, n_repeats), f"Label shape {labels.shape} mismatch (N, P)"
+            labels_reshaped = labels
         else:
-            labels_reshaped = labels.reshape(n_samples, -1) 
+            # Fallback if flattened
+            assert labels.size == n_samples * n_repeats
+            labels_reshaped = labels.reshape(n_samples, n_repeats)
         
         print(f"Processing {t_name}: {n_steps} steps, {n_repeats} repeats...")
         

@@ -182,10 +182,9 @@ class ContinualLearner:
                 flat_w = self.get_flat_params(state_end)
                 
                 if analysis_imgs is not None:
-                    reps = self._extract_features_jit(state_end, analysis_imgs)
-                    # Result: (Repeats, Samples, Dim)
-                    # We usually want (Samples, Repeats, Dim) for analysis pipeline
-                    reps = jnp.swapaxes(reps, 0, 1)
+                    reps = self._extract_features_jit(state_end, analysis_imgs) # (Repeats, Samples, Dim)
+                    # Enforce shape consistency with asserts
+                    assert reps.shape == (self.config.n_repeats, analysis_imgs.shape[0], self.config.hidden_dim)
                 else:
                     reps = jnp.zeros((1,))
 

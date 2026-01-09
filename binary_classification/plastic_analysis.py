@@ -114,6 +114,12 @@ def run_analysis_pipeline(config):
         rep_data = jnp.array(rep_data_np)
         w_data = jnp.array(w_data_np)
         
+        # Asserts for system integrity
+        # Expected: (Steps, Repeats, Samples, Dim)
+        assert rep_data.ndim == 4, f"Invalid rep shape {rep_data.shape}"
+        assert rep_data.shape[1] == config.n_repeats, "Repeat dimension mismatch"
+        assert rep_data.shape[3] == config.hidden_dim, "Hidden dim mismatch"
+
         n_steps = rep_data.shape[0]
         epochs_in_task = n_steps * config.log_frequency
 

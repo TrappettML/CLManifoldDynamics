@@ -88,7 +88,13 @@ def main():
         
         _, subset_lbls = learner.preload_data(analysis_ds)
 
-        if subset_lbls.ndim > 1: subset_lbls = subset_lbls.flatten()
+        # Assert shape: (Samples, Repeats, 1)
+        expected_samples = config.mandi_samples * 2
+        assert subset_lbls.shape == (expected_samples, config.n_repeats, 1), \
+            f"Label shape mismatch: {subset_lbls.shape} != ({expected_samples}, {config.n_repeats}, 1)"
+
+        # Squeeze last dim to save as (Samples, Repeats)
+        subset_lbls = subset_lbls.squeeze(-1)
         np.save(f"{config.reps_dir}/{task.name}_labels.npy", subset_lbls)
 
         # Train
