@@ -135,7 +135,6 @@ def compute_metrics_from_anchors(anchors_raw, t_vectors):
 # --- Simulated Capacity Kernels (Algorithm 1) ---
 
 # indices: 0:key, 1:flat_manifolds, 2:n_proj, 3:M_per_manifold, 4:P
-@jax.jit(static_argnums=(2, 3, 4))
 def check_linear_separability_batch(key, flat_manifolds, n_proj, M_per_manifold, P):
     """
     Checks if randomly projected manifolds are linearly separable.

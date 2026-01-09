@@ -19,37 +19,32 @@ class ContinualLearner:
 
     def preload_data(self, data_loader):
         """
-        Consumes the MultiRepeatDataLoader.
-        Returns jnp.arrays of shape: (Total_Samples, Repeats, Dim)
+        Consumes the JAX-based Data Generator.
+        Expects generator to yield: (Repeats, Batch_Size, Dim)
+        Returns JAX Arrays of shape: (Total_Samples, Repeats, Dim)
         """
-        # MultiRepeatDataLoader yields (Repeats, Batch, Dim)
-        # We want to concatenate along the Batch dimension (axis 1)
-        # resulting in (Repeats, Total_Samples, Dim)
-        
         images_list = []
         labels_list = []
         
         for batch_imgs, batch_lbls in data_loader:
-            images_list.append(batch_imgs) # (R, B, D)
-            labels_list.append(batch_lbls) # (R, B)
+            # batch_imgs is already a jnp.array: (Repeats, B, Dim)
+            images_list.append(batch_imgs)
+            labels_list.append(batch_lbls)
             
         if not images_list:
             raise ValueError("DataLoader returned no data.")
 
-        # Concatenate along axis 1 (Batch dim)
-        images = np.concatenate(images_list, axis=1) # (R, Total, D)
-        labels = np.concatenate(labels_list, axis=1) # (R, Total)
-        
-        if labels.ndim == 2: labels = labels[..., None] # (R, Total, 1)
+        # Use JAX concatenation.
+        # We concatenate along axis 1 (Batch dim) because axis 0 is Repeats.
+        # Result: (Repeats, Total, Dim)
+        images = jnp.concatenate(images_list, axis=1) 
+        labels = jnp.concatenate(labels_list, axis=1) 
 
-        # IMPORTANT: The training loop (scan) iterates over Time.
-        # We need dim 0 to be Time (Samples/Batches) and dim 1 to be Repeats.
-        # Current: (Repeats, Total, ...) -> Swap to (Total, Repeats, ...)
-        
-        images = np.swapaxes(images, 0, 1)
-        labels = np.swapaxes(labels, 0, 1)
+        # Swap axes to match the Training Loop requirement: (Time, Repeats, Dim)
+        images = jnp.swapaxes(images, 0, 1)
+        labels = jnp.swapaxes(labels, 0, 1)
 
-        return jnp.array(images), jnp.array(labels)
+        return images, labels
 
     def get_flat_params(self, state):
         return jax.vmap(self._flat_fn)(state.params)
