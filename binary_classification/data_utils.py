@@ -128,6 +128,17 @@ class FastVectorizedTask:
         
         yield subset_x, subset_y
 
+    def get_full_data(self):
+        """
+        Returns the full dataset in the Time-Major format expected by the Learner.
+        Input Internal Shape: (Repeats, Total_Samples, Dim)
+        Output Shape: (Total_Samples, Repeats, Dim)
+        """
+        # We assume X and Y are already JAX arrays on the correct device.
+        # We simply swap axes 0 and 1.
+        return jnp.swapaxes(self.X, 0, 1), jnp.swapaxes(self.Y, 0, 1)
+    
+
 def create_continual_tasks(config, split='train'):
     img_size = getattr(config, 'downsample_dim', None)
     

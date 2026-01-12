@@ -18,31 +18,40 @@ class ContinualLearner:
         
         self._flat_fn = lambda p: flatten_util.ravel_pytree(p)[0]
 
-    def preload_data(self, data_loader):
+    # In learner.py -> class ContinualLearner
+
+    def preload_data(self, data_source):
         """
-        Consumes the JAX-based Data Generator.
-        Expects generator to yield: (Repeats, Batch_Size, Dim)
-        Returns JAX Arrays of shape: (Total_Samples, Repeats, Dim)
+        Optimized data loader.
+        Args:
+            data_source: Can be a FastVectorizedTask object OR a Python generator/iterator.
+        Returns:
+            JAX Arrays of shape: (Total_Samples, Repeats, Dim)
         """
-        images_list = []
-        labels_list = []
+        # --- 1. Fast Path: Direct Memory Access ---
+        # If the source has the method to give us full data, take it.
+        if hasattr(data_source, 'get_full_data'):
+            return data_source.get_full_data()
+
+        # --- 2. Flexible Path: Generator Consumption ---
+        # Use list comprehension for speed. 
+        # Note: We must recreate the list if the generator is fresh. 
+        # Ideally, do not pass exhausted generators here.
+        batch_list = list(data_source)
         
-        for batch_imgs, batch_lbls in data_loader:
-            set_trace()
-            # batch_imgs is already a jnp.array: (Repeats, B, Dim)
-            images_list.append(batch_imgs)
-            labels_list.append(batch_lbls)
-            
-        if not images_list:
-            raise ValueError("DataLoader returned no data.")
+        if not batch_list:
+            raise ValueError("DataLoader returned no data. Ensure generator is not exhausted.")
 
-        # Use JAX concatenation.
-        # We concatenate along axis 1 (Batch dim) because axis 0 is Repeats.
+        # batch_list is a list of tuples: [(imgs, lbls), (imgs, lbls), ...]
+        # unzip them into two lists
+        images_list, labels_list = zip(*batch_list)
+
+        # Concatenate along axis 1 (Batch Dimension) because input is (Repeats, Batch, Dim)
         # Result: (Repeats, Total, Dim)
-        images = jnp.concatenate(images_list, axis=1) 
-        labels = jnp.concatenate(labels_list, axis=1) 
+        images = jnp.concatenate(images_list, axis=1)
+        labels = jnp.concatenate(labels_list, axis=1)
 
-        # Swap axes to match the Training Loop requirement: (Time, Repeats, Dim)
+        # Swap axes to match Training Loop: (Time, Repeats, Dim)
         images = jnp.swapaxes(images, 0, 1)
         labels = jnp.swapaxes(labels, 0, 1)
 
@@ -117,9 +126,10 @@ class ContinualLearner:
         
         for h in self.hooks: h.on_task_start(task, self.state)
 
-        # 1. Load Data (Now returns [Total, Repeats, Dim])
-        train_loader = task.load_data()
-        train_imgs_raw, train_lbls_raw = self.preload_data(train_loader)
+        # 1. Load Data
+        # OPTIMIZATION: Pass the 'task' object directly. 
+        # The new preload_data will trigger the Fast Path (get_full_data).
+        train_imgs_raw, train_lbls_raw = self.preload_data(task)
         
         # Reshape for Scan: (Batches, Repeats, Batch_Size, Dim)
         # train_imgs_raw is (Total, Repeats, Dim)
@@ -147,12 +157,16 @@ class ContinualLearner:
             # analysis_imgs is (Total, Repeats, Dim) -> OK for _extract_features_jit
 
         # 3. Test Data Cache
+        # Since we updated single_run.py to store arrays in test_streams, 
+        # we can simplify this or just assign them directly.
         if not hasattr(self, 'cached_test_data'):
             self.cached_test_data = {}
-        for t_name, t_loader in test_streams.items():
-            if t_name not in self.cached_test_data:
-                self.cached_test_data[t_name] = self.preload_data(t_loader)
-        test_data_jax = {k: v for k, v in self.cached_test_data.items()}
+            
+        for t_name, t_data in test_streams.items():
+            # t_data is now already (Images, Labels) tuple from single_run.py optimization
+            self.cached_test_data[t_name] = t_data
+            
+        test_data_jax = self.cached_test_data
 
         @jax.jit
         def nested_task_scan(initial_state):

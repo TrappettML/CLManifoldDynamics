@@ -58,8 +58,11 @@ def main():
     train_tasks = data_utils.create_continual_tasks(config, split='train')
     test_streams = {}
     test_tasks = data_utils.create_continual_tasks(config, split='test')
+    
     for t in test_tasks:
-        test_streams[t.name] = t.load_data()
+        # Optimization: Pre-load the data into JAX arrays ONCE.
+        # Store the Tensors, NOT the generator.
+        test_streams[t.name] = t.get_full_data()
 
     data_utils.save_task_samples_grid(train_tasks, config)
     
