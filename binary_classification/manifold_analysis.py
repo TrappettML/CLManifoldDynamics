@@ -376,9 +376,31 @@ def analyze_manifold_trajectory(config, task_names):
                     for k in all_stored_metrics: step_res[k].append(jnp.nan)
                     continue
                 
+                # Subsample data to keep QP solver efficient
+                # We select 'config.mandi_samples' per class
+                unique_classes = jnp.unique(curr_labels)
+                indices_list = []
+                for cls in unique_classes:
+                    # Get all indices for this class
+                    cls_idxs = jnp.where(curr_labels == cls)[0]
+                    
+                    # Randomly shuffle and pick top K
+                    # Use a subkey for permutation to ensure randomness
+                    perm_key = jax.random.fold_in(unique_key, int(cls))
+                    shuffled_cls_idxs = jax.random.permutation(perm_key, cls_idxs)
+                    
+                    # Take up to mandi_samples
+                    limit = min(len(cls_idxs), config.mandi_samples)
+                    indices_list.append(shuffled_cls_idxs[:limit])
+                
+                # Concatenate and filter data
+                selected_idxs = jnp.concatenate(indices_list)
+                curr_reps_sub = curr_reps[selected_idxs]
+                curr_labels_sub = curr_labels[selected_idxs]
+
                 try:
                     # 1. Standard GLUE Metrics
-                    res = run_manifold_geometry(glue_key, curr_reps, curr_labels, n_samples_t=config.n_t)
+                    res = run_manifold_geometry(glue_key, curr_reps_sub, curr_labels_sub, n_samples_t=config.n_t)
                     for k in glue_metrics: step_res[k].append(res[k])
                     
                     # 2. Simulated Capacity & Accuracy

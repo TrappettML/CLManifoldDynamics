@@ -87,22 +87,18 @@ def main():
 
     # --- 5. CL Loop ---
     for task in train_tasks:
-        analysis_ds = task.load_mandi_subset(samples_per_class=config.mandi_samples)
+        # Use the full test set of the current task for analysis
+        # test_streams[task.name] is (Images, Labels) with shape (Total, Repeats, Dim)
+        analysis_data = test_streams[task.name]
         
-        _, subset_lbls = learner.preload_data(analysis_ds)
+        # Save labels for this task (Shape: Total_Samples, Repeats)
+        # analysis_data[1] is (Total, Repeats, 1), squeeze for saving
+        subset_lbls = analysis_data[1].squeeze(-1)
+        np.save(f"{config.reps_dir}/{task.name}_labels.npy", np.array(subset_lbls))
 
-        # Assert shape: (Samples, Repeats, 1)
-        expected_samples = config.mandi_samples * 2
-        assert subset_lbls.shape == (expected_samples, config.n_repeats, 1), \
-            f"Label shape mismatch: {subset_lbls.shape} != ({expected_samples}, {config.n_repeats}, 1)"
-
-        # Squeeze last dim to save as (Samples, Repeats)
-        subset_lbls = subset_lbls.squeeze(-1)
-        np.save(f"{config.reps_dir}/{task.name}_labels.npy", subset_lbls)
-
-        # Train
+        # Train: Pass analysis_data directly
         rep_history, w_history = learner.train_task(
-            task, test_streams, global_history, analysis_subset=analysis_ds
+            task, test_streams, global_history, analysis_subset=analysis_data
         )
         
         # Save History (Sparse)

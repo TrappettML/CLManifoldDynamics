@@ -110,23 +110,7 @@ class FastVectorizedTask:
             batch_y = self.Y[:, batch_idx, :]
             
             yield batch_x, batch_y
-
-    def load_mandi_subset(self, samples_per_class):
-        """
-        Returns a simplified generator for analysis (manifold geometry).
-        Yields exactly ONE batch containing (Repeats, 2*samples_per_class, Dim).
-        """
-        # We take the first 2*N samples. 
-        # Since the data construction (create_continual_tasks) balances 0s and 1s 
-        # and shuffles them, taking the first K samples is a random subset.
-        
-        limit = samples_per_class * 2
-        limit = min(limit, self.n_samples)
-
-        subset_x = self.X[:, :limit, :]
-        subset_y = self.Y[:, :limit, :]
-        
-        yield subset_x, subset_y
+            
 
     def get_full_data(self):
         """

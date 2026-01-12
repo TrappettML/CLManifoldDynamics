@@ -33,6 +33,9 @@ class ContinualLearner:
         if hasattr(data_source, 'get_full_data'):
             return data_source.get_full_data()
 
+        if isinstance(data_source, tuple) and len(data_source) == 2:
+            return data_source
+        
         # --- 2. Flexible Path: Generator Consumption ---
         # Use list comprehension for speed. 
         # Note: We must recreate the list if the generator is fresh. 

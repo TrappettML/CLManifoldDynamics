@@ -47,8 +47,8 @@ def get_config(dataset_name, algorithm):
      config.patience = 50          
      config.min_delta = 1e-4    
      
-     # mandi variables
-     config.mandi_samples = 50 
+     # analysis variables
+     config.analysis_subsamples = 100 
      config.n_t = 20
      
      config.metric_type = 'acc'
