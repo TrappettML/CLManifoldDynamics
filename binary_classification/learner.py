@@ -4,6 +4,7 @@ import numpy as np
 from functools import partial
 from jax import flatten_util
 import algorithms 
+from ipdb import set_trace
 
 class ContinualLearner:
     def __init__(self, config, hooks=None):
@@ -27,6 +28,7 @@ class ContinualLearner:
         labels_list = []
         
         for batch_imgs, batch_lbls in data_loader:
+            set_trace()
             # batch_imgs is already a jnp.array: (Repeats, B, Dim)
             images_list.append(batch_imgs)
             labels_list.append(batch_lbls)
