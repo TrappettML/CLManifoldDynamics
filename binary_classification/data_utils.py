@@ -63,6 +63,7 @@ def get_base_data_jax(dataset_name, root, train, img_size):
     Y_jax = jnp.array(Y_np)
     
     return X_jax, Y_jax
+
 class FastVectorizedTask:
     def __init__(self, task_id, name, X_jax, Y_jax, batch_size):
         """
