@@ -2,6 +2,7 @@ import os
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import warnings
@@ -21,6 +22,9 @@ import glue_analysis
 class LoggerHook(CLHook):
     def on_task_start(self, task, state):
         print(f"[Hook] Starting Task {task['name']}")
+
+    def on_task_end(self, task, state, metrics):
+        print(f"[Hook] Finished Task {task['name']}")
 
 
 def main():

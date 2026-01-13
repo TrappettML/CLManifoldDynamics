@@ -111,7 +111,7 @@ def generate_task_class_pairs(num_tasks, n_repeats, num_classes, seed):
             task_class_pairs[t, r, 0] = class_A
             task_class_pairs[t, r, 1] = class_B
             
-        print(f"  Repeat {r}: {[(task_class_pairs[t, r, 0], task_class_pairs[t, r, 1]) for t in range(num_tasks)]}")
+        # print(f"  Repeat {r}: {[(task_class_pairs[t, r, 0], task_class_pairs[t, r, 1]) for t in range(num_tasks)]}")
     
     return task_class_pairs
 
