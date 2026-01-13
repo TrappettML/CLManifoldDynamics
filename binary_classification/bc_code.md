@@ -54,37 +54,30 @@ Shape: (L, N_Repeats, Input_Dim, Output_Dim)
 Accumulation: These tensors are accumulated in device memory (VRAM) throughout the task execution and transferred to the host only after the task completes.
 
 ### 4. I/O Strategy
-Task Boundary I/O:
 
-Train: Run task loop on GPU (accumulating logs).
-Transfer: Move accumulated history (weights, representations) from GPU to Host RAM.
-Flush: Save history to disk with structured naming.
-Clean: Delete task data from GPU to free space for Task t+1.
+Directory Hierarchy To ensure experiment separability, output directories should be dynamically generated based on the configuration. The root save path follows the structure: ```./results/{dataset}/{algorithm}/task_{t:03d}/```
 
-Saving Format & Directory Structure:
-All training artifacts are organized hierarchically by dataset and algorithm:
-```
-results/
-├── {dataset}/
-│   ├── {algorithm}/
-│   │   ├── task_001/
-│   │   │   ├── representations.npy
-│   │   │   ├── weights.npy
-│   │   │   ├── metrics.pkl
-│   │   │   └── metadata.json
-```
+Task Boundary I/O
 
-Naming Convention:
+Train: Run the compiled task loop on the GPU. Logs (metrics, weights, representations) are accumulated in VRAM to minimize host-device communication overhead.
 
-dataset: Source dataset identifier (e.g., 'mnist', 'cifar10', 'fashion_mnist')
-algorithm: Learning algorithm identifier (e.g., 'SL', 'RL', 'ER', etc.)
-task_{t:03d}: Zero-padded task index (e.g., task_000, task_001, ..., task_099)
+Transfer: Once Task $t$ is complete, move the accumulated history tensors from GPU to Host RAM.
 
-File Formats:
+Flush: Save the history to the disk using the defined directory hierarchy.
 
-Representations & Weights: NumPy ```.npy``` format for efficient array storage and loading
-Metrics: Pickle ```.pkl``` format to store dictionary of metric arrays with metadata
-Metadata: JSON ```.json``` format for human-readable configuration and reproducibility
+Artifacts:
+```loss.npy```: Evaluation loss <br>
+Shape: ($L$, $N_{repeats}$, $T_{eval}$).
 
-Example Save Path:
-```results/mnist/ewc/task_042/representations.npy```
+```acc.npy```: Evaluation acc <br>
+Shape: ($L$, $N_{repeats}$, $T_{eval}$).
+
+```weights.npy```: Frozen model parameters<br>
+Shape: ($L$, $N_{repeats}$, $D_{in}$, $D_{out}$).
+
+```repr.npy```: Hidden state representations <br>
+Shape: ($L$, $N_{repeats}, $T_{eval}$, $N_{subsamples}$, H).
+
+Clean: Explicitly delete task data and accumulated history from GPU memory to free space for Task t+1.
+
+Example path: ```./restuls/mnist/RL/task_001/loss.npy```
