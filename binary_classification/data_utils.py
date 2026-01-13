@@ -63,12 +63,12 @@ def get_base_data_jax(dataset_name, root, train, img_size):
     Y_jax = jnp.array(Y_np)
     
     return X_jax, Y_jax
-
 class FastVectorizedTask:
     def __init__(self, task_id, name, X_jax, Y_jax, batch_size):
         """
-        X_jax: (Repeats, Total_Samples, Dim) JAX Array
-        Y_jax: (Repeats, Total_Samples, 1)   JAX Array
+        Canonical Storage:
+        X_jax: (Total_Samples, Repeats, Dim)
+        Y_jax: (Total_Samples, Repeats, 1)
         """
         self.task_id = task_id
         self.name = name
@@ -76,24 +76,17 @@ class FastVectorizedTask:
         self.Y = Y_jax
         self.batch_size = batch_size
         
-        # Shape: (Repeats, N, Dim)
-        self.n_repeats = self.X.shape[0]
-        self.n_samples = self.X.shape[1]
+        # Shape: (N, R, Dim)
+        self.n_samples = self.X.shape[0]
+        self.n_repeats = self.X.shape[1]
 
     def load_data(self):
         """
-        Yields batches of JAX arrays.
-        Output Shape: (Repeats, Batch_Size, Dim)
-        
-        Crucial: We shuffle INDICES, then apply the same indices to all repeats.
-        This keeps the 'time' dimension aligned across vectorization, which is 
-        better for gradient stability and JIT compilation.
+        Yields batches in Canonical Format.
+        Output Shape: (Batch_Size, Repeats, Dim)
         """
         indices = np.arange(self.n_samples)
         np.random.shuffle(indices) 
-        
-        # Apply shuffle to the data upfront (or index on the fly)
-        # Indexing on the fly in JAX is fast enough for this scale.
         
         for start_idx in range(0, self.n_samples, self.batch_size):
             end_idx = min(start_idx + self.batch_size, self.n_samples)
@@ -104,23 +97,17 @@ class FastVectorizedTask:
                 
             batch_idx = indices[start_idx:end_idx]
             
-            # Slice: (Repeats, Batch, Dim)
-            # Since self.X is (Repeats, Total, Dim), we slice dim 1.
-            batch_x = self.X[:, batch_idx, :]
-            batch_y = self.Y[:, batch_idx, :]
+            # Slice: (Batch, Repeats, Dim) - Direct slicing on canonical format
+            batch_x = self.X[batch_idx, :, :]
+            batch_y = self.Y[batch_idx, :, :]
             
             yield batch_x, batch_y
-            
 
     def get_full_data(self):
         """
-        Returns the full dataset in the Time-Major format expected by the Learner.
-        Input Internal Shape: (Repeats, Total_Samples, Dim)
-        Output Shape: (Total_Samples, Repeats, Dim)
+        Returns full data in Canonical Format (Samples, Repeats, Dim).
         """
-        # We assume X and Y are already JAX arrays on the correct device.
-        # We simply swap axes 0 and 1.
-        return jnp.swapaxes(self.X, 0, 1), jnp.swapaxes(self.Y, 0, 1)
+        return self.X, self.Y
     
 
 def create_continual_tasks(config, split='train'):
@@ -193,13 +180,17 @@ def create_continual_tasks(config, split='train'):
             final_x_list.append(x[:min_samples_in_task])
             final_y_list.append(y[:min_samples_in_task])
             
-        # Stack into (Repeats, N, Dim)
+        # Stack into (Repeats, N, Dim) -> Then Transpose to Canonical (N, Repeats, Dim)
         task_X = jnp.stack(final_x_list, axis=0) 
         task_Y = jnp.stack(final_y_list, axis=0)
         
+        # Canonical Conversion: (R, N, D) -> (N, R, D)
+        task_X = jnp.swapaxes(task_X, 0, 1)
+        task_Y = jnp.swapaxes(task_Y, 0, 1)
+        
         task_name = f"T{t_i+1}_{config.dataset_name}"
         
-        print(f"  [{task_name}] Created. Shape: {task_X.shape}. Classes varied per repeat.")
+        print(f"  [{task_name}] Created. Canonical Shape: {task_X.shape}")
         
         tasks.append(FastVectorizedTask(t_i+1, task_name, task_X, task_Y, config.batch_size))
         
@@ -229,10 +220,10 @@ def save_task_samples_grid(tasks, config, output_file="task_samples_grid.png"):
     
     for r in range(n_disp_repeats):
         for t_idx, task in enumerate(tasks):
-            # Task.X is (Repeats, N, Dim) JAX Array
-            # We must convert to Numpy for Matplotlib
-            img_flat = np.array(task.X[r, 0, :])
-            lbl = np.array(task.Y[r, 0, 0])
+            # Task.X is Canonical (N, R, Dim)
+            # Access: [Sample 0, Repeat r, :]
+            img_flat = np.array(task.X[0, r, :])
+            lbl = np.array(task.Y[0, r, 0])
             
             # Infer Sqrt for square image reconstruction
             side = int(np.sqrt(img_flat.shape[0]))

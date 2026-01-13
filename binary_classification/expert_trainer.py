@@ -8,7 +8,7 @@ def train_single_expert(config, train_task, test_loader):
     
     learner = ContinualLearner(config)
     
-    # 1. Preload Data (Returns [Total, Repeats, Dim])
+    # 1. Preload Data (Returns Canonical [Total, Repeats, Dim])
     train_imgs, train_lbls = learner.preload_data(train_task.load_data())
     test_imgs, test_lbls = learner.preload_data(test_loader)
     
@@ -20,7 +20,7 @@ def train_single_expert(config, train_task, test_loader):
     train_imgs = train_imgs[:limit]
     train_lbls = train_lbls[:limit]
     
-    # Reshape: (Batches, B_Size, Repeats, Dim) -> (Batches, Repeats, B_Size, Dim)
+    # Reshape: (Limit, R, D) -> (Batches, B_Size, R, D) -> (Batches, R, B_Size, D)
     train_imgs_reshaped = train_imgs.reshape(n_batches, config.batch_size, config.n_repeats, -1)
     train_imgs_reshaped = jnp.swapaxes(train_imgs_reshaped, 1, 2)
     

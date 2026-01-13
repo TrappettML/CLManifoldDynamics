@@ -23,13 +23,9 @@ class ContinualLearner:
     def preload_data(self, data_source):
         """
         Optimized data loader.
-        Args:
-            data_source: Can be a FastVectorizedTask object OR a Python generator/iterator.
-        Returns:
-            JAX Arrays of shape: (Total_Samples, Repeats, Dim)
+        Expects or produces Canonical Format: (Total_Samples, Repeats, Dim)
         """
         # --- 1. Fast Path: Direct Memory Access ---
-        # If the source has the method to give us full data, take it.
         if hasattr(data_source, 'get_full_data'):
             return data_source.get_full_data()
 
@@ -37,26 +33,17 @@ class ContinualLearner:
             return data_source
         
         # --- 2. Flexible Path: Generator Consumption ---
-        # Use list comprehension for speed. 
-        # Note: We must recreate the list if the generator is fresh. 
-        # Ideally, do not pass exhausted generators here.
         batch_list = list(data_source)
-        
         if not batch_list:
-            raise ValueError("DataLoader returned no data. Ensure generator is not exhausted.")
+            raise ValueError("DataLoader returned no data.")
 
-        # batch_list is a list of tuples: [(imgs, lbls), (imgs, lbls), ...]
-        # unzip them into two lists
+        # batch_list: [(Batch_Size, Repeats, Dim), ...]
         images_list, labels_list = zip(*batch_list)
 
-        # Concatenate along axis 1 (Batch Dimension) because input is (Repeats, Batch, Dim)
-        # Result: (Repeats, Total, Dim)
-        images = jnp.concatenate(images_list, axis=1)
-        labels = jnp.concatenate(labels_list, axis=1)
-
-        # Swap axes to match Training Loop: (Time, Repeats, Dim)
-        images = jnp.swapaxes(images, 0, 1)
-        labels = jnp.swapaxes(labels, 0, 1)
+        # Concatenate along axis 0 (Time/Sample Dimension)
+        # Result: (Total, Repeats, Dim)
+        images = jnp.concatenate(images_list, axis=0)
+        labels = jnp.concatenate(labels_list, axis=0)
 
         return images, labels
 
@@ -113,11 +100,11 @@ class ContinualLearner:
 
     @partial(jax.jit, static_argnums=(0,))
     def _extract_features_jit(self, state, images):
-        # images: (Total, Repeats, Dim)
+        # images: (Total, Repeats, Dim) -> Canonical
+        # vmap expects (Repeats, ...) for state, so we need to align data.
+        # We want to map over Repeats. 
+        # Data shape for vmap: (Repeats, Total, Dim)
         images_t = jnp.swapaxes(images, 0, 1)
-        
-        if images_t.ndim == 4: 
-             images_t = images_t.reshape(images_t.shape[0], -1, images_t.shape[-1])
         
         def extract_single(curr_state, curr_imgs):
             return self.algo.get_features(curr_state, curr_imgs)
@@ -129,27 +116,27 @@ class ContinualLearner:
         
         for h in self.hooks: h.on_task_start(task, self.state)
 
-        # 1. Load Data
-        # OPTIMIZATION: Pass the 'task' object directly. 
-        # The new preload_data will trigger the Fast Path (get_full_data).
+        # 1. Load Data (Canonical: N, R, D)
         train_imgs_raw, train_lbls_raw = self.preload_data(task)
         
-        # Reshape for Scan: (Batches, Repeats, Batch_Size, Dim)
-        # train_imgs_raw is (Total, Repeats, Dim)
-        n_samples = train_imgs_raw.shape[0] # Total samples (min length across repeats)
-        batches_per_epoch = n_samples // self.config.batch_size
-        limit = batches_per_epoch * self.config.batch_size
+        # 2. Prepare Batches for JAX Scan
+        # We need: (Num_Batches, Repeats, Batch_Size, Dim)
+        n_samples = train_imgs_raw.shape[0]
+        n_batches = n_samples // self.config.batch_size
+        limit = n_batches * self.config.batch_size
         
-        train_imgs = train_imgs_raw[:limit]
-        train_lbls = train_lbls_raw[:limit]
-
-        # Reshape: (Batches, B_Size, Repeats, Dim) -> Swap to (Batches, Repeats, B_Size, Dim)
-        epoch_data_imgs = train_imgs.reshape(batches_per_epoch, self.config.batch_size, self.config.n_repeats, -1)
-        epoch_data_imgs = jnp.swapaxes(epoch_data_imgs, 1, 2)
+        # A. Slice to divisible limit
+        t_imgs = train_imgs_raw[:limit] # (Limit, R, D)
+        t_lbls = train_lbls_raw[:limit]
         
-        epoch_data_lbls = train_lbls.reshape(batches_per_epoch, self.config.batch_size, self.config.n_repeats, -1)
-        epoch_data_lbls = jnp.swapaxes(epoch_data_lbls, 1, 2)
-
+        # B. Reshape to (Num_Batches, Batch_Size, Repeats, Dim)
+        t_imgs = t_imgs.reshape(n_batches, self.config.batch_size, self.config.n_repeats, -1)
+        t_lbls = t_lbls.reshape(n_batches, self.config.batch_size, self.config.n_repeats, -1)
+        
+        # C. Transpose to (Num_Batches, Repeats, Batch_Size, Dim) for efficient vmap inside scan
+        epoch_data_imgs = jnp.swapaxes(t_imgs, 1, 2)
+        epoch_data_lbls = jnp.swapaxes(t_lbls, 1, 2)
+        
         epoch_data_imgs = jax.device_put(epoch_data_imgs)
         epoch_data_lbls = jax.device_put(epoch_data_lbls)
 
