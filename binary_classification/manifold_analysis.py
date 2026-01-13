@@ -375,9 +375,9 @@ def analyze_manifold_trajectory(config, task_names):
                 if not jnp.all(jnp.isfinite(curr_reps)):
                     for k in all_stored_metrics: step_res[k].append(jnp.nan)
                     continue
-                
+
                 # Subsample data to keep QP solver efficient
-                # We select 'config.mandi_samples' per class
+                # We select 'config.analysis_subsamples' per class (using the config variable)
                 unique_classes = jnp.unique(curr_labels)
                 indices_list = []
                 for cls in unique_classes:
@@ -389,8 +389,8 @@ def analyze_manifold_trajectory(config, task_names):
                     perm_key = jax.random.fold_in(unique_key, int(cls))
                     shuffled_cls_idxs = jax.random.permutation(perm_key, cls_idxs)
                     
-                    # Take up to mandi_samples
-                    limit = min(len(cls_idxs), config.mandi_samples)
+                    # Update: Use analysis_subsamples from config
+                    limit = min(len(cls_idxs), config.analysis_subsamples)
                     indices_list.append(shuffled_cls_idxs[:limit])
                 
                 # Concatenate and filter data

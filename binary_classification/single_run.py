@@ -73,6 +73,9 @@ def main():
     init_weights = learner.get_flat_params(learner.state)
     np.save(f"{config.reps_dir}/init_weights.npy", np.array(init_weights))
     
+    # Initialize RNG for consistent subsampling
+    rng = np.random.default_rng(config.seed)
+
     global_history = {
         'train_acc': [], 'train_loss': [],
         'test_metrics': {
@@ -87,16 +90,28 @@ def main():
 
     # --- 5. CL Loop ---
     for task in train_tasks:
-        # Use the full test set of the current task for analysis
-        # test_streams[task.name] is (Images, Labels) with shape (Total, Repeats, Dim)
-        analysis_data = test_streams[task.name]
+        # Get full data: (Total, Repeats, Dim)
+        full_imgs, full_lbls = test_streams[task.name]
         
-        # Save labels for this task (Shape: Total_Samples, Repeats)
-        # analysis_data[1] is (Total, Repeats, 1), squeeze for saving
-        subset_lbls = analysis_data[1].squeeze(-1)
+        # Subsample for analysis to save memory/storage
+        n_total = full_imgs.shape[0]
+        n_sub = min(n_total, config.analysis_subsamples)
+        
+        # Randomly select indices (consistent across repeats/time)
+        indices = rng.choice(n_total, size=n_sub, replace=False)
+        indices.sort() # Sort for tidiness
+        
+        # Slice the data
+        sub_imgs = full_imgs[indices]
+        sub_lbls = full_lbls[indices]
+        
+        analysis_data = (sub_imgs, sub_lbls)
+        
+        # Save labels for this task (Shape: N_sub, Repeats)
+        subset_lbls = sub_lbls.squeeze(-1)
         np.save(f"{config.reps_dir}/{task.name}_labels.npy", np.array(subset_lbls))
 
-        # Train: Pass analysis_data directly
+        # Train: Pass subsampled analysis_data
         rep_history, w_history = learner.train_task(
             task, test_streams, global_history, analysis_subset=analysis_data
         )
