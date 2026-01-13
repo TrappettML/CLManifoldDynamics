@@ -12,7 +12,7 @@ import data_utils
 import config as config_module
 from learner import ContinualLearner
 from expert_trainer import train_single_expert
-from hooks import CLHook
+from models import CLHook
 import plastic_analysis
 import cl_analysis 
 import manifold_analysis
