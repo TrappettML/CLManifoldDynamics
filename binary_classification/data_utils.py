@@ -80,10 +80,6 @@ def generate_task_class_pairs(num_tasks, n_repeats, num_classes, seed):
         
     Returns:
         task_class_pairs: Shape (T, R, 2) - [task_idx, repeat_idx] = (class_A, class_B)
-        
-    Example (MNIST, 10 classes, T=5):
-        Repeat 0: [(0,1), (2,3), (4,5), (6,7), (8,9)]
-        Repeat 1: [(3,7), (0,5), (1,8), (2,6), (4,9)]
     """
     rng = np.random.default_rng(seed)
     
@@ -111,18 +107,12 @@ def generate_task_class_pairs(num_tasks, n_repeats, num_classes, seed):
             task_class_pairs[t, r, 0] = class_A
             task_class_pairs[t, r, 1] = class_B
             
-        # print(f"  Repeat {r}: {[(task_class_pairs[t, r, 0], task_class_pairs[t, r, 1]) for t in range(num_tasks)]}")
-    
     return task_class_pairs
 
 
 def create_single_task_data(task_idx, task_class_pairs, X_global, Y_global, config, split='train'):
     """
     LAZY LOADING: Creates data for a single task on-demand.
-    
-    Spec Requirement (Section 2):
-    "Training data for Task t should be generated/loaded to GPU VRAM immediately 
-    before Task t begins and cleared immediately after."
     
     Args:
         task_idx: Task index (0-based)
@@ -195,10 +185,6 @@ def preload_all_test_data(task_class_pairs, X_global, Y_global, config):
     """
     PRE-LOADS all test data as required by spec.
     
-    Spec Requirement (Section 2):
-    "Test sets for all T tasks are pre-loaded and kept in memory throughout 
-    the entire experiment."
-    
     Returns:
         test_data_dict: {task_name: (images, labels)} in Canonical format
     """
@@ -218,12 +204,6 @@ def preload_all_test_data(task_class_pairs, X_global, Y_global, config):
 def save_task_metadata(task_idx, task_class_pairs, config, additional_info=None):
     """
     Saves metadata.json as specified in Section 4.
-    
-    Args:
-        task_idx: Task index
-        task_class_pairs: Pre-computed class pairs array
-        config: Configuration object
-        additional_info: Optional dict with extra metadata
     """
     task_dir = os.path.join("results", config.dataset_name, config.algorithm, f"task_{task_idx:03d}")
     os.makedirs(task_dir, exist_ok=True)
@@ -262,50 +242,102 @@ def save_task_metadata(task_idx, task_class_pairs, config, additional_info=None)
 
 def save_task_samples_grid(task_class_pairs, X_global, Y_global, config, output_file="task_samples_grid.png"):
     """
-    Visualizes first samples from generated tasks for verification.
+    Visualizes task data in a grid.
+    Layout: Rows = Repeats, Cols = Tasks * 2 (Class 0, Class 1 pairs).
     """
-    n_disp_repeats = min(config.n_repeats, 5)
+    n_repeats = config.n_repeats
     num_tasks = config.num_tasks
     
     if num_tasks == 0:
         return
 
-    fig, axes = plt.subplots(n_disp_repeats, num_tasks, figsize=(num_tasks * 2.5, n_disp_repeats * 2.5))
+    # 2 Columns per task (one for class 0, one for class 1)
+    n_cols = num_tasks * 2
+    n_rows = n_repeats
     
-    # Handle subplot dimensions
-    if n_disp_repeats == 1 and num_tasks == 1:
+    # Calculate figure size (roughly 1.5 inch per subplot)
+    fig_width = max(n_cols * 1.5, 6)
+    fig_height = max(n_rows * 1.5, 4)
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height))
+    
+    # Standardize axes to always be 2D array
+    if n_rows == 1 and n_cols == 1:
         axes = np.array([[axes]])
-    elif n_disp_repeats == 1:
+    elif n_rows == 1:
         axes = axes.reshape(1, -1)
-    elif num_tasks == 1:
+    elif n_cols == 1:
         axes = axes.reshape(-1, 1)
 
-    print(f"\nGenerating task visualization grid...")
+    print(f"\nGenerating task visualization grid ({n_rows}x{n_cols})...")
     
     for t_idx in range(num_tasks):
+        # We need the data to find actual images
         task_X, task_Y, task_name = create_single_task_data(
             t_idx, task_class_pairs, X_global, Y_global, config, split='train'
         )
         
-        for r in range(n_disp_repeats):
-            img_flat = np.array(task_X[0, r, :])
-            lbl = np.array(task_Y[0, r, 0])
+        # Convert to numpy for easier indexing
+        task_X_np = np.array(task_X) # (N, R, Dim)
+        task_Y_np = np.array(task_Y) # (N, R, 1)
+
+        for r in range(n_repeats):
+            # Original Classes (from metadata)
+            class_A = int(task_class_pairs[t_idx, r, 0]) # Maps to L=0
+            class_B = int(task_class_pairs[t_idx, r, 1]) # Maps to L=1
+
+            # Get labels for this repeat
+            lbls_r = task_Y_np[:, r, 0] # (N,)
+
+            # Find first index of 0 and first index of 1
+            idx_0 = np.where(lbls_r == 0)[0]
+            idx_1 = np.where(lbls_r == 1)[0]
             
-            side = int(np.sqrt(img_flat.shape[0]))
-            img = img_flat.reshape(side, side)
+            # Safety check
+            if len(idx_0) == 0 or len(idx_1) == 0:
+                continue
+                
+            idx_0 = idx_0[0]
+            idx_1 = idx_1[0]
             
-            ax = axes[r, t_idx]
-            ax.imshow(img, cmap='gray')
+            # --- Plot Column 1: Label 0 (Class A) ---
+            col_idx_0 = t_idx * 2
+            ax0 = axes[r, col_idx_0]
             
+            img0_flat = task_X_np[idx_0, r, :]
+            side = int(np.sqrt(img0_flat.shape[0]))
+            img0 = img0_flat.reshape(side, side)
+            
+            ax0.imshow(img0, cmap='gray')
+            ax0.set_xlabel(f"True: {class_A}", fontsize=9)
+            
+            # --- Plot Column 2: Label 1 (Class B) ---
+            col_idx_1 = t_idx * 2 + 1
+            ax1 = axes[r, col_idx_1]
+            
+            img1_flat = task_X_np[idx_1, r, :]
+            img1 = img1_flat.reshape(side, side)
+            
+            ax1.imshow(img1, cmap='gray')
+            ax1.set_xlabel(f"True: {class_B}", fontsize=9)
+
+            # --- Formatting ---
+            
+            # Row Labels (Only on first column of the grid)
+            if col_idx_0 == 0:
+                ax0.set_ylabel(f"Repeat {r}", fontsize=10, fontweight='bold')
+            else:
+                ax0.set_ylabel("")
+            ax1.set_ylabel("")
+
+            # Top Column Headers (Only on first row)
             if r == 0:
-                ax.set_title(f"{task_name}", fontsize=10, fontweight='bold')
+                ax0.set_title(f"{task_name}\n(L: 0)", fontsize=10, fontweight='bold')
+                ax1.set_title(f"{task_name}\n(L: 1)", fontsize=10, fontweight='bold')
             
-            # Show actual class pair for this repeat
-            class_A = task_class_pairs[t_idx, r, 0]
-            class_B = task_class_pairs[t_idx, r, 1]
-            ax.set_xlabel(f"R{r} | ({class_A},{class_B}) L:{int(lbl)}", fontsize=8)
-            ax.set_xticks([])
-            ax.set_yticks([])
+            # Remove ticks
+            ax0.set_xticks([]); ax0.set_yticks([])
+            ax1.set_xticks([]); ax1.set_yticks([])
 
     plt.tight_layout()
     save_path = os.path.join(config.figures_dir, output_file)
