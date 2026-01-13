@@ -15,7 +15,7 @@ from expert_trainer import train_single_expert
 from models import CLHook
 import plastic_analysis
 import cl_analysis
-import manifold_analysis
+import glue_analysis
 
 
 class LoggerHook(CLHook):
@@ -54,7 +54,7 @@ def main():
     print(f"Tasks: {config.num_tasks}, Repeats: {config.n_repeats}")
     print(f"Log Frequency: {config.log_frequency}")
     print(f"Results Directory: {config.results_dir}")
-    print(f"{'='*60}\n")
+    print(f"{'='*40}\n")
     
     # Create directories
     os.makedirs(config.results_dir, exist_ok=True)
@@ -118,121 +118,148 @@ def main():
     task_boundaries = []
     total_epochs = 0
 
-    # --- 8. PHASE 4: Continual Learning Loop with LAZY Loading ---
+    # --- 8. PHASE 4: Continual Learning Loop with Integrated Expert ---
     print(f"\n{'='*60}")
-    print(f"Starting Continual Learning Training")
+    print(f"Starting Continual Learning & Expert Training")
     print(f"{'='*60}\n")
     
+    # Pre-allocate expert history storage for the global plotter
+    expert_histories = {} 
+    expert_stats = {}
+
     for task_idx in range(config.num_tasks):
         task_name = f"task_{task_idx:03d}"
         
         print(f"\n>>> TASK {task_idx + 1}/{config.num_tasks}: {task_name} <<<")
         
-        # LAZY LOAD: Generate training data for this task only
+        # ---------------------------------------------------------
+        # 1. LAZY LOAD: Generate training data for this task
+        # ---------------------------------------------------------
         print(f"  [Lazy Loading] Generating training data for {task_name}...")
         train_X, train_Y, _ = data_utils.create_single_task_data(
             task_idx, task_class_pairs, X_train_global, Y_train_global, config, split='train'
         )
         
-        # Create task dict (lightweight wrapper)
+        # Create task dict
         task = {
             'id': task_idx,
             'name': task_name,
-            'data': (train_X, train_Y),
+            'data': (train_X, train_Y), # Canonical: (N, R, D)
             'n_samples': train_X.shape[0]
         }
         
-        # Get test data (already pre-loaded)
-        test_X, test_Y = test_data_dict[task_name]
+        # ---------------------------------------------------------
+        # 2. PREPARE ANALYSIS SUBSET (ALL TASKS)
+        # ---------------------------------------------------------
+        # Spec Requirement: "subsamples from every task's test set"
+        # We stack subsamples from Task 0...Task T to track representation drift
         
-        # Subsample for analysis
-        n_total = test_X.shape[0]
-        n_sub = min(n_total, config.analysis_subsamples)
-        indices = rng.choice(n_total, size=n_sub, replace=False)
-        indices.sort()
+        analysis_X_list = []
+        analysis_Y_list = []
         
-        sub_test_X = test_X[indices]
-        sub_test_Y = test_Y[indices]
-        analysis_data = (sub_test_X, sub_test_Y)
+        # Iterate over all tasks (not just current)
+        for t in range(config.num_tasks):
+            t_name_iter = f"task_{t:03d}"
+            t_test_X, t_test_Y = test_data_dict[t_name_iter]
+            
+            n_total = t_test_X.shape[0]
+            n_sub = min(n_total, config.analysis_subsamples)
+            
+            # Use sorted indices for consistency across time steps
+            indices = rng.choice(n_total, size=n_sub, replace=False)
+            indices.sort()
+            
+            analysis_X_list.append(t_test_X[indices])
+            analysis_Y_list.append(t_test_Y[indices])
+            
+        # Concatenate: (Num_Tasks * S, R, D)
+        analysis_data_X = jnp.concatenate(analysis_X_list, axis=0)
+        analysis_data_Y = jnp.concatenate(analysis_Y_list, axis=0)
+        analysis_subset = (analysis_data_X, analysis_data_Y)
         
-        # Save analysis labels
+        # Save analysis labels (reshaped for clarity: Num_Tasks, Subsamples, R)
         task_dir = os.path.join(config.results_dir, task_name)
         os.makedirs(task_dir, exist_ok=True)
-        subset_labels = sub_test_Y.squeeze(-1)
-        np.save(os.path.join(task_dir, "binary_labels.npy"), np.array(subset_labels))
         
-        # Train on this task
+        analysis_lbls_reshaped = analysis_data_Y.squeeze(-1) # (T*S, R)
+        analysis_lbls_reshaped = analysis_lbls_reshaped.reshape(config.num_tasks, config.analysis_subsamples, config.n_repeats)
+        np.save(os.path.join(task_dir, "binary_labels.npy"), np.array(analysis_lbls_reshaped))
+
+        # ---------------------------------------------------------
+        # 3. TRAIN LEARNER
+        # ---------------------------------------------------------
+        # Returns rep_history: (L, Repeats, Total_Samples, Hidden)
         rep_history, weight_history = learner.train_task(
-            task, test_data_dict, global_history, analysis_subset=analysis_data
+            task, test_data_dict, global_history, analysis_subset=analysis_subset
         )
         
-        # Save artifacts to disk (Spec Section 4)
+        # Reshape Representations to match Spec: (L, Repeats, N_Eval_Tasks, N_Subsamples, Hidden_Dim)
         if rep_history is not None:
-            np.save(os.path.join(task_dir, "representations.npy"), rep_history)
+            L, R, Total_S, H = rep_history.shape
+            T_eval = config.num_tasks
+            S = config.analysis_subsamples
+            
+            # Reshape logic: The samples were stacked [Task0, Task1...], so we split that dim
+            rep_reshaped = rep_history.reshape(L, R, T_eval, S, H)
+            np.save(os.path.join(task_dir, "representations.npy"), rep_reshaped)
         
         if weight_history is not None:
             np.save(os.path.join(task_dir, "weights.npy"), weight_history)
         
-        # Save task-specific metrics
-        task_metrics = {
+        # Save Learner Metrics
+        learner_metrics = {
             'train_acc': global_history['train_acc'][-config.epochs_per_task:],
             'train_loss': global_history['train_loss'][-config.epochs_per_task:],
             'test_acc': global_history['test_metrics'][task_name]['acc'][-config.epochs_per_task:],
             'test_loss': global_history['test_metrics'][task_name]['loss'][-config.epochs_per_task:]
         }
         with open(os.path.join(task_dir, "metrics.pkl"), 'wb') as f:
-            pickle.dump(task_metrics, f)
-        
-        # Save metadata
+            pickle.dump(learner_metrics, f)
+            
         data_utils.save_task_metadata(task_idx, task_class_pairs, config)
-        
-        # Clear training data to free memory (LAZY LOADING principle)
-        del train_X, train_Y, task
-        
-        total_epochs += config.epochs_per_task
-        task_boundaries.append(total_epochs)
-        
-        print(f"  [Memory] Training data for {task_name} cleared from memory")
 
-    learner.clear_test_cache()
-
-    # --- 9. Expert Baselines ---
-    expert_stats = {}
-    expert_histories = {}
-    
-    print(f"\n{'='*60}")
-    print(f"Computing Expert Baselines")
-    print(f"{'='*60}\n")
-    
-    for task_idx in range(config.num_tasks):
-        task_name = f"task_{task_idx:03d}"
+        # ---------------------------------------------------------
+        # 4. TRAIN EXPERT (Integrated)
+        # ---------------------------------------------------------
+        # Uses the exact same train_X/train_Y currently in memory
         
-        # Recreate training data for expert
-        train_X, train_Y, _ = data_utils.create_single_task_data(
-            task_idx, task_class_pairs, X_train_global, Y_train_global, config, split='train'
-        )
-        train_task = {'data': (train_X, train_Y), 'name': task_name}
+        expert_task_wrapper = {'name': task_name, 'data': (train_X, train_Y)}
+        expert_test_data = test_data_dict[task_name]
         
-        test_data = test_data_dict[task_name]
+        # Returns: loss_mean, loss_std, acc_mean, acc_std, test_losses, test_accs
+        _, _, _, _, exp_loss, exp_acc = train_single_expert(config, expert_task_wrapper, expert_test_data)
         
-        _, _, _, _, exp_loss, exp_acc = train_single_expert(config, train_task, test_data)
-        
-        expert_histories[task_name] = {
-            'loss': exp_loss,
-            'acc': exp_acc
+        # Save Expert Metrics locally
+        expert_metrics_dict = {
+            'test_loss': exp_loss, # (Epochs, Repeats)
+            'test_acc': exp_acc    # (Epochs, Repeats)
         }
-        
+        with open(os.path.join(task_dir, "expert_metrics.pkl"), 'wb') as f:
+            pickle.dump(expert_metrics_dict, f)
+            
+        # Update global stats for plotting at the end
+        expert_histories[task_name] = {'loss': exp_loss, 'acc': exp_acc}
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             expert_stats[task_name] = {
                 'loss_mean': np.nanmean(exp_loss, axis=1),
                 'acc_mean': np.nanmean(exp_acc, axis=1)
             }
-        
-        # Clean up
-        del train_X, train_Y, train_task
 
-    # --- 10. CL Metrics ---
+        # ---------------------------------------------------------
+        # 5. CLEANUP
+        # ---------------------------------------------------------
+        del train_X, train_Y, task, expert_task_wrapper, analysis_data_X, analysis_data_Y
+        
+        total_epochs += config.epochs_per_task
+        task_boundaries.append(total_epochs)
+        
+        print(f"  [Memory] Training data for {task_name} cleared")
+
+    learner.clear_test_cache()
+    
+
+    # --- 9. CL Metrics ---
     cl_results = cl_analysis.compute_and_log_cl_metrics(
         global_history, expert_histories, config
     )
@@ -248,7 +275,7 @@ def main():
         pickle.dump(global_history, f)
     print(f"Global history saved to {history_save_path}")
 
-    # --- 11. Plotting ---
+    # --- 10. Plotting ---
     print(f"\n{'='*60}")
     print(f"Generating Plots")
     print(f"{'='*60}\n")
@@ -365,7 +392,7 @@ def main():
     
     plastic_analysis.run_analysis_pipeline(config)
     
-    manifold_results = manifold_analysis.analyze_manifold_trajectory(config, task_names)
+    manifold_results = glue_analysis.analyze_manifold_trajectory(config, task_names)
     if manifold_results:
         manifold_path = os.path.join(config.results_dir, "manifold_metrics.pkl")
         with open(manifold_path, 'wb') as f:
