@@ -3,8 +3,8 @@ import jax.numpy as jnp
 import numpy as np
 from functools import partial
 from jax import flatten_util
-import algorithms 
-from ipdb import set_trace
+import algorithms
+
 
 class ContinualLearner:
     def __init__(self, config, hooks=None):
@@ -12,170 +12,205 @@ class ContinualLearner:
         self.hooks = hooks if hooks else []
         
         self.algo = algorithms.get_algorithm(config)
-
+        
         rng = jax.random.key(config.seed)
         self.state = self.algo.init_vectorized_state(rng, config.input_dim)
         
         self._flat_fn = lambda p: flatten_util.ravel_pytree(p)[0]
 
-    # In learner.py -> class ContinualLearner
-
     def preload_data(self, data_source):
         """
         Optimized data loader.
-        Expects or produces Canonical Format: (Total_Samples, Repeats, Dim)
+        Expects Canonical Format: (Total_Samples, Repeats, Dim)
+        
+        Args:
+            data_source: Either a tuple (X, Y) or an object with get_full_data()
+        
+        Returns:
+            (images, labels) in Canonical format
         """
-        # --- 1. Fast Path: Direct Memory Access ---
-        if hasattr(data_source, 'get_full_data'):
-            return data_source.get_full_data()
-
+        # Fast path: Direct tuple
         if isinstance(data_source, tuple) and len(data_source) == 2:
             return data_source
         
-        # --- 2. Flexible Path: Generator Consumption ---
+        # Object with method
+        if hasattr(data_source, 'get_full_data'):
+            return data_source.get_full_data()
+        
+        # Generator path (legacy support)
         batch_list = list(data_source)
         if not batch_list:
             raise ValueError("DataLoader returned no data.")
-
-        # batch_list: [(Batch_Size, Repeats, Dim), ...]
+        
         images_list, labels_list = zip(*batch_list)
-
-        # Concatenate along axis 0 (Time/Sample Dimension)
-        # Result: (Total, Repeats, Dim)
         images = jnp.concatenate(images_list, axis=0)
         labels = jnp.concatenate(labels_list, axis=0)
-
+        
         return images, labels
 
     def get_flat_params(self, state):
+        """Returns flattened parameters across all repeats."""
         return jax.vmap(self._flat_fn)(state.params)
 
     @partial(jax.jit, static_argnums=(0,))
     def _train_epoch_jit(self, state, batch_images, batch_labels):
         """
-        state: (Repeats, ...)
-        batch_images: (Batches, Repeats, B_Size, Dim) - Scanned over dim 0
-        batch_labels: (Batches, Repeats, B_Size, 1)
-        """
+        Trains one epoch using jax.lax.scan over batches.
         
+        Args:
+            state: Vectorized state (Repeats, ...)
+            batch_images: (Num_Batches, Repeats, Batch_Size, Dim)
+            batch_labels: (Num_Batches, Repeats, Batch_Size, 1)
+        
+        Returns:
+            final_state: Updated state
+            mean_loss: (Repeats,) averaged over batches
+            mean_acc: (Repeats,) averaged over batches
+        """
         def scan_fn(carry_state, batch_data):
-            # batch_data is a tuple of (img_slice, lbl_slice)
-            # img_slice shape: (Repeats, B_Size, Dim)
-            imgs, lbls = batch_data
-            
-            # We want to map over Repeats (dim 0)
-            # parallel_scan takes (single_state, single_batch_img, single_batch_lbl)
-            # vmap(..., in_axes=(0, 0, 0)) splits the state and the batch data by repeat
+            imgs, lbls = batch_data  # (Repeats, Batch_Size, Dim)
             
             def parallel_update(s, i, l):
                 return self.algo.train_step(s, (i, l))
-
+            
+            # vmap over repeats dimension
             step_update = jax.vmap(parallel_update, in_axes=(0, 0, 0))
             new_state, metrics = step_update(carry_state, imgs, lbls)
             
             return new_state, metrics
-
-        # Scan over the Batches dimension
+        
+        # Scan over batches
         final_state, (losses, accs) = jax.lax.scan(scan_fn, state, (batch_images, batch_labels))
         
-        # losses shape: (Batches, Repeats)
+        # Average over batches: (Batches, Repeats) -> (Repeats,)
         return final_state, jnp.mean(losses, axis=0), jnp.mean(accs, axis=0)
 
     @partial(jax.jit, static_argnums=(0,))
     def _eval_jit(self, state, images, labels):
-        # state: (Repeats, ...)
-        # images: (Total_Samples, Repeats, Dim) -> Need to reshuffle?
-        # Typically eval is done on full set.
-        # Eval logic: vmap over Repeats. Each repeat has its own State and its own Data (images[:, r, :])
+        """
+        Evaluates on full dataset.
         
-        # Transpose images to (Repeats, Total_Samples, Dim) for vmap
+        Args:
+            state: Vectorized state (Repeats, ...)
+            images: (Total_Samples, Repeats, Dim) - Canonical format
+            labels: (Total_Samples, Repeats, 1)
+        
+        Returns:
+            loss: (Repeats,)
+            acc: (Repeats,)
+        """
+        # Transpose to (Repeats, Total_Samples, Dim) for vmap
         images_t = jnp.swapaxes(images, 0, 1)
         labels_t = jnp.swapaxes(labels, 0, 1)
         
         def eval_single(curr_state, curr_imgs, curr_lbls):
             return self.algo.eval_step(curr_state, (curr_imgs, curr_lbls))
-
-        # vmap over (State, Images, Labels)
+        
         return jax.vmap(eval_single, in_axes=(0, 0, 0))(state, images_t, labels_t)
 
     @partial(jax.jit, static_argnums=(0,))
     def _extract_features_jit(self, state, images):
-        # images: (Total, Repeats, Dim) -> Canonical
-        # vmap expects (Repeats, ...) for state, so we need to align data.
-        # We want to map over Repeats. 
-        # Data shape for vmap: (Repeats, Total, Dim)
+        """
+        Extracts hidden features from model.
+        
+        Args:
+            state: Vectorized state (Repeats, ...)
+            images: (Total_Samples, Repeats, Dim) - Canonical format
+        
+        Returns:
+            features: (Repeats, Total_Samples, Hidden_Dim)
+        """
+        # Transpose to (Repeats, Total_Samples, Dim) for vmap
         images_t = jnp.swapaxes(images, 0, 1)
         
         def extract_single(curr_state, curr_imgs):
             return self.algo.get_features(curr_state, curr_imgs)
-
+        
         return jax.vmap(extract_single, in_axes=(0, 0))(state, images_t)
 
-    def train_task(self, task, test_streams, global_history, analysis_subset=None):
-        print(f"--- CL Training on {task.name} ---")
+    def train_task(self, task, test_data_dict, global_history, analysis_subset=None):
+        """
+        Trains on a single task using nested jax.lax.scan.
         
-        for h in self.hooks: h.on_task_start(task, self.state)
+        Args:
+            task: Dict with keys 'id', 'name', 'data' (tuple of X, Y)
+            test_data_dict: {task_name: (test_X, test_Y)} for all tasks
+            global_history: Dict accumulating metrics across tasks
+            analysis_subset: Optional (sub_X, sub_Y) for representation extraction
+        """
+        task_name = task['name']
+        print(f"\n=== Training on {task_name} ===")
+        
+        for h in self.hooks:
+            h.on_task_start(task, self.state)
 
-        # 1. Load Data (Canonical: N, R, D)
-        train_imgs_raw, train_lbls_raw = self.preload_data(task)
+        # Load training data (Canonical: N, R, D)
+        train_imgs, train_lbls = self.preload_data(task['data'])
         
-        # 2. Prepare Batches for JAX Scan
-        # We need: (Num_Batches, Repeats, Batch_Size, Dim)
-        n_samples = train_imgs_raw.shape[0]
+        # Prepare batches for scan: (Num_Batches, Repeats, Batch_Size, Dim)
+        n_samples = train_imgs.shape[0]
         n_batches = n_samples // self.config.batch_size
         limit = n_batches * self.config.batch_size
         
-        # A. Slice to divisible limit
-        t_imgs = train_imgs_raw[:limit] # (Limit, R, D)
-        t_lbls = train_lbls_raw[:limit]
+        # Truncate to divisible limit
+        train_imgs = train_imgs[:limit]
+        train_lbls = train_lbls[:limit]
         
-        # B. Reshape to (Num_Batches, Batch_Size, Repeats, Dim)
-        t_imgs = t_imgs.reshape(n_batches, self.config.batch_size, self.config.n_repeats, -1)
-        t_lbls = t_lbls.reshape(n_batches, self.config.batch_size, self.config.n_repeats, -1)
+        # Reshape: (Limit, R, D) -> (Batches, Batch_Size, R, D) -> (Batches, R, Batch_Size, D)
+        train_imgs = train_imgs.reshape(n_batches, self.config.batch_size, self.config.n_repeats, -1)
+        train_lbls = train_lbls.reshape(n_batches, self.config.batch_size, self.config.n_repeats, -1)
         
-        # C. Transpose to (Num_Batches, Repeats, Batch_Size, Dim) for efficient vmap inside scan
-        epoch_data_imgs = jnp.swapaxes(t_imgs, 1, 2)
-        epoch_data_lbls = jnp.swapaxes(t_lbls, 1, 2)
+        # Transpose for efficient vmap: (Batches, R, Batch_Size, D)
+        epoch_data_imgs = jnp.swapaxes(train_imgs, 1, 2)
+        epoch_data_lbls = jnp.swapaxes(train_lbls, 1, 2)
         
+        # Move to device
         epoch_data_imgs = jax.device_put(epoch_data_imgs)
         epoch_data_lbls = jax.device_put(epoch_data_lbls)
 
-        # 2. Analysis Data
+        # Analysis data
         analysis_imgs = None
         if analysis_subset:
             analysis_imgs, _ = self.preload_data(analysis_subset)
-            # analysis_imgs is (Total, Repeats, Dim) -> OK for _extract_features_jit
 
-        # 3. Test Data Cache
-        # Since we updated single_run.py to store arrays in test_streams, 
-        # we can simplify this or just assign them directly.
+        # Cache test data
         if not hasattr(self, 'cached_test_data'):
             self.cached_test_data = {}
-            
-        for t_name, t_data in test_streams.items():
-            # t_data is now already (Images, Labels) tuple from single_run.py optimization
+        
+        for t_name, t_data in test_data_dict.items():
             self.cached_test_data[t_name] = t_data
-            
+        
         test_data_jax = self.cached_test_data
 
         @jax.jit
         def nested_task_scan(initial_state):
+            """
+            Nested scan structure:
+            - Outer: Log intervals
+            - Inner: Training epochs within each interval
+            """
             log_freq = self.config.log_frequency
             total_epochs = self.config.epochs_per_task
             n_outer_steps = total_epochs // log_freq
             
             def inner_loop(carry, _):
+                """Trains for log_freq epochs."""
                 curr_state = carry
-                new_state, tr_loss, tr_acc = self._train_epoch_jit(curr_state, epoch_data_imgs, epoch_data_lbls)
+                new_state, tr_loss, tr_acc = self._train_epoch_jit(
+                    curr_state, epoch_data_imgs, epoch_data_lbls
+                )
                 return new_state, (tr_loss, tr_acc)
-
+            
             def outer_step(carry, _):
+                """Runs inner loop, then evaluates and logs."""
                 state_start = carry
+                
+                # Train for log_freq epochs
                 state_end, (block_losses, block_accs) = jax.lax.scan(
                     inner_loop, state_start, None, length=log_freq
                 )
                 
-                # Eval
+                # Evaluate on all test tasks
                 def run_eval(s):
                     results = {}
                     for t_name in sorted(test_data_jax.keys()):
@@ -183,17 +218,21 @@ class ContinualLearner:
                         l, a = self._eval_jit(s, ti, tl)
                         results[t_name] = (l, a)
                     return results
-
+                
                 test_metrics_sparse = run_eval(state_end)
+                
+                # Flatten weights
                 flat_w = self.get_flat_params(state_end)
                 
+                # Extract representations
                 if analysis_imgs is not None:
-                    reps = self._extract_features_jit(state_end, analysis_imgs) # (Repeats, Samples, Dim)
-                    # Enforce shape consistency with asserts
-                    assert reps.shape == (self.config.n_repeats, analysis_imgs.shape[0], self.config.hidden_dim)
+                    reps = self._extract_features_jit(state_end, analysis_imgs)
+                    # Verify shape: (Repeats, Samples, Hidden_Dim)
+                    expected_shape = (self.config.n_repeats, analysis_imgs.shape[0], self.config.hidden_dim)
+                    assert reps.shape == expected_shape, f"Rep shape {reps.shape} != {expected_shape}"
                 else:
                     reps = jnp.zeros((1,))
-
+                
                 metrics = {
                     'tr_loss': block_losses,
                     'tr_acc': block_accs,
@@ -201,45 +240,67 @@ class ContinualLearner:
                     'weights': flat_w,
                     'reps': reps
                 }
+                
                 return state_end, metrics
-
+            
+            # Run outer scan
             outer_range = jnp.arange(n_outer_steps)
             final_state, history = jax.lax.scan(outer_step, initial_state, outer_range)
+            
             return final_state, history
-
+        
+        # Execute training
+        print(f"  Compiling and running nested scan...")
         self.state, history_tree = nested_task_scan(self.state)
-
-        # Post-processing
+        
+        # Post-processing: Convert to numpy and format
         history_np = jax.tree_util.tree_map(np.array, history_tree)
         
-        # tr_loss shape: (Outer, Inner, Repeats) -> (Total_Epochs, Repeats)
+        # Flatten training metrics: (Outer, Inner, Repeats) -> (Total_Epochs, Repeats)
         tr_loss_dense = history_np['tr_loss'].reshape(-1, self.config.n_repeats)
         tr_acc_dense = history_np['tr_acc'].reshape(-1, self.config.n_repeats)
+        
         global_history['train_loss'].extend(tr_loss_dense)
         global_history['train_acc'].extend(tr_acc_dense)
-
+        
+        # Expand sparse test metrics to dense format
         for t_name in history_np['test'].keys():
-            sparse_loss = history_np['test'][t_name][0]
+            sparse_loss = history_np['test'][t_name][0]  # (Outer, Repeats)
             sparse_acc = history_np['test'][t_name][1]
+            
             n_outer = sparse_loss.shape[0]
             n_repeats = sparse_loss.shape[1]
             total_block_len = n_outer * self.config.log_frequency
+            
+            # Create dense arrays with NaN padding
             dense_loss = np.full((total_block_len, n_repeats), np.nan)
             dense_acc = np.full((total_block_len, n_repeats), np.nan)
-            eval_indices = np.arange(self.config.log_frequency - 1, total_block_len, self.config.log_frequency)
+            
+            # Place sparse values at log positions
+            eval_indices = np.arange(
+                self.config.log_frequency - 1,
+                total_block_len,
+                self.config.log_frequency
+            )
             dense_loss[eval_indices] = sparse_loss
             dense_acc[eval_indices] = sparse_acc
+            
             global_history['test_metrics'][t_name]['loss'].extend(dense_loss)
             global_history['test_metrics'][t_name]['acc'].extend(dense_acc)
-
-        weight_history = history_np['weights']
-        rep_history = history_np['reps'] if analysis_subset else None
         
-        for h in self.hooks: h.on_task_end(task, self.state, metrics=None)
+        # Extract histories for saving
+        weight_history = history_np['weights']  # (Outer, Repeats, Param_Dim)
+        rep_history = history_np['reps'] if analysis_subset else None  # (Outer, Repeats, Samples, Hidden)
+        
+        for h in self.hooks:
+            h.on_task_end(task, self.state, metrics=None)
+        
+        print(f"  Training complete for {task_name}")
         
         return rep_history, weight_history
     
     def clear_test_cache(self):
-        """Clear cached test data to free memory."""
+        """Clears cached test data to free memory."""
         if hasattr(self, 'cached_test_data'):
             self.cached_test_data.clear()
+            print("  Test cache cleared")
