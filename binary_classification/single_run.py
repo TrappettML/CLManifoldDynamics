@@ -15,7 +15,7 @@ from expert_trainer import train_single_expert
 from models import CLHook
 import plastic_analysis
 import cl_analysis 
-import manifold_analysis
+import glue_analysis
 
 
 class LoggerHook(CLHook):
@@ -286,7 +286,7 @@ def main():
     plastic_analysis.run_analysis_pipeline(config)
     # --- 9. Manifold Analysis ---
     # Will save .pkl to /data/ and .png to /plots/
-    manifold_results = manifold_analysis.analyze_manifold_trajectory(config, task_names)
+    manifold_results = glue_analysis.analyze_manifold_trajectory(config, task_names)
     
     if manifold_results:
         manifold_save_path = os.path.join(config.reps_dir, f"manifold_metrics_full_{config.dataset_name}.pkl")
