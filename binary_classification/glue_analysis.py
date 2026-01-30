@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 from jaxopt import OSQP
 import matplotlib.pyplot as plt
+from itertools import combinations_with_replacement as cwp
 import os
 
 
@@ -15,7 +16,7 @@ class glue_solver():
         self.A = jnp.eye(self.N)
         self.H = jnp.zeros((self.P*self.M,1))
         # set up probes and dichotomies
-        y_dichotomies = None
+        y_options = self.get_dichotomies()
         t_mu = jnp.zeros(self.N)
         t_sigma = jnp.eye(self.N)
 
@@ -23,6 +24,17 @@ class glue_solver():
         t_key, y_key = jax.random.split(glue_key)
         self.all_t_ks = jax.random.multivariate_normal(t_key, t_mu, t_sigma, shape=(self.n_t,))
         self.all_y_ks = None
+
+    def get_dichotomies(self):
+        labels = [1,-1]
+        y_1 = jnp.array([list(y_i) for y_i in cwp(labels, self.P)][1:-1])
+        assert y_1.shape[0] == self.P-1, "Error with dichotomy creation"
+        y_2 = jnp.flip(y_1)
+        all_y_options = jnp.concatenate((y_1,y_2))
+        assert all_y_options.shape[0] == (self.P - 1)*2, "Error in dichotomy concat"
+        return all_y_options
+
+
 
 
     def sample_single_anchor_point(self):
