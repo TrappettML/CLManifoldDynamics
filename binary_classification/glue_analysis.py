@@ -4,6 +4,30 @@ from jaxopt import OSQP
 import matplotlib.pyplot as plt
 import os
 
+
+
+class glue_solver():
+    def __init__(self, glue_key, point_clouds: int, m_points: int, n_dim_space: int, n_t: int, make_plots: bool):
+        self.P = point_clouds
+        self.M = m_points
+        self.N = n_dim_space
+        self.n_t = n_t
+        self.A = jnp.eye(self.N)
+        self.H = jnp.zeros((self.P*self.M,1))
+        # set up probes and dichotomies
+        y_dichotomies = None
+        t_mu = jnp.zeros(self.N)
+        t_sigma = jnp.eye(self.N)
+
+        # use glue key to generate t and y keys
+        t_key, y_key = jax.random.split(glue_key)
+        self.all_t_ks = jax.random.multivariate_normal(t_key, t_mu, t_sigma, shape=(self.n_t,))
+        self.all_y_ks = None
+
+
+    def sample_single_anchor_point(self):
+        pass
+
 # --- JAX-JIT Compiled Optimization Kernels ---
 
 @jax.jit(static_argnums=(2, 3, 4))

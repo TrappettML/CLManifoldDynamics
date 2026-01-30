@@ -1,4 +1,4 @@
-# Project Summary
+# Summary
 After training a learner and expert according to bc_code.md, we want to anlyze its performance. The first step is to to visualize the train/test loss and accuracy. We use the test accuracy or loss to compute the CL Metrics. The training code saves the weights and representations for every log_freq epoch out of all the training epochs for each task. These are both used in Plasticine analysis. Finally, glue uses the representations to calculate capacity, dim and radius for the class manifolds.
 
 We want to call each of these in the single_run.py script. Theses analysis methods will read in the data saved from the main training script following the format found in bc_code.md. Each analysis will calculate its correpsonding metrics. The results for each analysis will be saved in a way so as to be used in a comparison plotter, where we can compare these metrics between algorithms. Right now We have only RL and SL but will add others in the future. 
@@ -13,15 +13,11 @@ Quantifies continual learning performance through various metrics based on accur
 Data is saved in the single_run.py script after training. See bc_code.md and single_run.py for how data is saved. 
 
 ### Processing Steps
-### Processing Steps
 
 **1.1 Data Preparation**
-* **Input:** Stack test metrics across all tasks.
-    * Shape: `(Total_Epochs, N_Repeats, N_Eval_Tasks)`
-* **Filtering:** Extract valid log indices at defined `log_frequency` intervals.
-* **Reshaping:** Group data by the active training task block.
-    * Shape: `(N_Train_Tasks, Steps_Per_Task, N_Repeats, N_Eval_Tasks)`
-    * *Note: This separates the time dimension `Steps_Per_Task` needed for integration.*
+* **Input:** Directory path to experiment: ```/(dataset)/(algorithm)/task_xxx/```
+* **Parse Data:** Read data from ```(task_xxx)/metrics.pkl```; this contains acc/loss data for specific task. 
+* **Combine Data:** Combine data into Matrix shape: ```(N_tasks_train, N_task_eval, epochs_per_task, Repeats) for each test acc and loss. 
 
 **1.2 Performance Matrix Construction**
 We construct the tensor $M$ where indices correspond to $(i, j, r)$.

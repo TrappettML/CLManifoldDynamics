@@ -8,6 +8,7 @@ import numpy as np
 import warnings
 import pickle
 import argparse
+from ipdb import set_trace
 
 import data_utils
 import config as config_module
@@ -188,8 +189,8 @@ def main():
         analysis_lbls_reshaped = analysis_data_Y.squeeze(-1) # (T*S, R)
         analysis_lbls_reshaped = analysis_lbls_reshaped.reshape(config.num_tasks, config.analysis_subsamples, config.n_repeats)
         np.save(os.path.join(task_dir, "binary_labels.npy"), np.array(analysis_lbls_reshaped))
-
-        # ---------------------------------------------------------
+        set_trace()
+        # -------- -------------------------------------------------
         # 3. TRAIN LEARNER
         # ---------------------------------------------------------
         # Returns rep_history: (L, Repeats, Total_Samples, Hidden)
@@ -390,22 +391,23 @@ def main():
     plt.close()
 
     # --- 12. Analysis Pipelines ---
-    print(f"\n{'='*60}")
-    print(f"Running Analysis Pipelines")
-    print(f"{'='*60}\n")
-    
-    plastic_analysis.run_analysis_pipeline(config)
-    
-    manifold_results = glue_analysis.analyze_manifold_trajectory(config, task_names)
-    if manifold_results:
-        manifold_path = os.path.join(config.results_dir, "manifold_metrics.pkl")
-        with open(manifold_path, 'wb') as f:
-            pickle.dump(manifold_results, f)
-        print(f"Manifold metrics saved to {manifold_path}")
-    
-    print(f"\n{'='*60}")
-    print(f"Experiment Complete!")
-    print(f"{'='*60}\n")
+    if False:
+        print(f"\n{'='*60}")
+        print(f"Running Analysis Pipelines")
+        print(f"{'='*60}\n")
+        
+        plastic_analysis.run_analysis_pipeline(config)
+        
+        manifold_results = glue_analysis.analyze_manifold_trajectory(config, task_names)
+        if manifold_results:
+            manifold_path = os.path.join(config.results_dir, "manifold_metrics.pkl")
+            with open(manifold_path, 'wb') as f:
+                pickle.dump(manifold_results, f)
+            print(f"Manifold metrics saved to {manifold_path}")
+        
+        print(f"\n{'='*60}")
+        print(f"Experiment Complete!")
+        print(f"{'='*60}\n")
 
 
 if __name__ == "__main__":
