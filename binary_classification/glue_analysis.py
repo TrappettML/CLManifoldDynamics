@@ -8,36 +8,63 @@ import os
 
 
 class glue_solver():
-    def __init__(self, glue_key, point_clouds: int, m_points: int, n_dim_space: int, n_t: int, make_plots: bool):
-        self.P = point_clouds
+    def __init__(self, glue_key, 
+                 P_point_clouds: int, 
+                 m_points: int, 
+                 n_dim_space: int, 
+                 n_t: int):
+        """Take the hyperparameters and setup the t and y values"""
+        self.P = P_point_clouds
         self.M = m_points
         self.N = n_dim_space
         self.n_t = n_t
         self.A = jnp.eye(self.N)
         self.H = jnp.zeros((self.P*self.M,1))
+        t_key, y_key = jax.random.split(glue_key)
         # set up probes and dichotomies
-        y_options = self.get_dichotomies()
         t_mu = jnp.zeros(self.N)
         t_sigma = jnp.eye(self.N)
 
         # use glue key to generate t and y keys
-        t_key, y_key = jax.random.split(glue_key)
         self.all_t_ks = jax.random.multivariate_normal(t_key, t_mu, t_sigma, shape=(self.n_t,))
-        self.all_y_ks = None
+        self.all_y_ks = self.get_dichotomies(y_key)
 
-    def get_dichotomies(self):
-        labels = [1,-1]
-        y_1 = jnp.array([list(y_i) for y_i in cwp(labels, self.P)][1:-1])
-        assert y_1.shape[0] == self.P-1, "Error with dichotomy creation"
-        y_2 = jnp.flip(y_1)
-        all_y_options = jnp.concatenate((y_1,y_2))
-        assert all_y_options.shape[0] == (self.P - 1)*2, "Error in dichotomy concat"
-        return all_y_options
+    def get_dichotomies(self, key):
+        """Return the dichotomies for P classes for each n_t
+            returns a matrix: n_t x P filled with 1/-1 """
+        labels = jnp.array([1,-1])
+        ys_key = jax.random.split(key)
+        potential_ys = jax.random.choice(ys_key, 
+                                        labels, 
+                                        shape=(n_fillers, self.P), 
+                                        replace=True, 
+                                        mode="low")
+        ys_filler = jnp.concatenate(labels*self.P)[:self.P]
+        non_dichotomy_mask = jnp.abs(jnp.sum(potential_ys, axis=1))==self.P
+        n_fillers = jnp.sum(non_dichotomy_mask)
+        repeated_filler = jnp.repeat(ys_filler, repeat=n_fillers, axis=0)
+        potential_ys = potential_ys.at[:,non_dichotomy_mask].set(repeated_filler)
+        assert potential_ys.shape[0] == self.n_t, "n_t shape for potential ys incorrect"
+        assert potential_ys.shape[1] == self.P, "P shape for potnential ys incorrect"
+        return potential_ys
+
+    def run(self, data, make_plots: bool = False):
+        """runs glue solver: take plots, make G, 
+        calc anchor point 
+        -> ap centers, axis -> capacity, dim, radius, etc.
+        Plot if true, if dimensions are larger than 3, 
+        embed them using PCA, then plot
+        """
+        pass
+
+    def sample_anchor_points(self, data):
+        """Using the values in self, vmap over inner single AP function 
+        to calculate AP for each n_t. Save the APs, w, primal, Gs, """
+
+        def sample_single_anchor_point():
+            pass
 
 
-
-
-    def sample_single_anchor_point(self):
         pass
 
 # --- JAX-JIT Compiled Optimization Kernels ---
