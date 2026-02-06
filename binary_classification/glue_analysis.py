@@ -34,6 +34,7 @@ class glue_solver():
         self.all_t_ks = jax.random.multivariate_normal(t_key, t_mu, t_sigma, shape=(self.n_t,))
         self.all_y_ks = self.get_dichotomies(y_key)
         self.P_indices = jnp.array(list(permutations(range(self.P), r=2)))
+        self._sample_jit = jax.jit(self.sample_anchor_points)
 
     def get_dichotomies(self, ys_key):
         """Return the dichotomies for P classes for each n_t
@@ -54,6 +55,7 @@ class glue_solver():
         assert potential_ys.shape[0] == self.n_t, "n_t shape for potential ys incorrect"
         assert potential_ys.shape[1] == self.P, "P shape for potnential ys incorrect"
         return potential_ys 
+    
 
     def get_m_data(self, data: jax.Array) -> jax.Array:
         """Sample from full data to get M data points
@@ -83,21 +85,23 @@ class glue_solver():
         assert data.shape[2] == self.N, "Data has incorrect N features"
 
         m_data = self.get_m_data(data)
-        self.sample_anchor_points(m_data) # (aps, Gs, primals), shapes: ((n_t, P,N),(n_t,P*M,N),(n_t,N,1))
+        anchor_points, Gs, Primals = self._sample_jit(m_data) # (aps, Gs, primals), shapes: ((n_t, P,N),(n_t,P*M,N),(n_t,N,1))
+        self.anchor_points = anchor_points
+        self.Gs = Gs
+        self.Primals = Primals
         self.get_ap_centers()
         self.get_aps_axis_var()
         geometries = self.manifold_geometries()
         self.geometries = geometries
         return geometries
     
-
-
     def sample_anchor_points(self, m_data: jax.Array):
         """Using the values in self, vmap over inner single AP function 
         to calculate AP for each n_t. 
         input: m_data: shape: P,M,N
         Return: APs, w, primal, Gs, """
         qp = OSQP(tol=1e-4)
+        @jax.jit
         def sample_single_anchor_point(y_k: jax.Array, t_k: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
             "Single anchor point function, calclulate anchor points for t and y "
             "return primals, G and anchorpoints"
@@ -116,9 +120,6 @@ class glue_solver():
             return (anchor_points, G, primal)
         # all shapes: [(n_t,P,N), (n_t, P, P), (n_t, N)]
         anchor_points, Gs, Primals = jax.vmap(sample_single_anchor_point,in_axes=(0,0))(self.all_y_ks, self.all_t_ks)
-        self.anchor_points = anchor_points
-        self.Gs = Gs
-        self.Primals = Primals
         return anchor_points, Gs, Primals
 
     def get_ap_centers(self):
@@ -130,7 +131,7 @@ class glue_solver():
         return s_0, G_0
     
     def get_aps_axis_var(self):
-        # s_1ks.shape (P,n_t,N) = apshape: (n_t,P,N) x centers:(P,N) // vmapped over P, makes P first index, reshape
+        # s_1ks.shape = apshape: (n_t,P,N) x centers:(P,N) // vmapped over P, makes P first index, reshape
         s_1ks = jax.vmap(lambda x,y: x-y, in_axes=(1,0))(self.anchor_points, self.centers).swapaxes(1,0) # swaps to (n_t, P, N)
         # t_1ks.shape (n_t,P) = s_1ks shape: (n_t,P,N) x all_t_ks.shape: (n_t, N)
         t_1ks = jax.vmap(lambda x,y: x@y.T, in_axes=(0,0))(s_1ks, self.all_t_ks)
@@ -213,7 +214,7 @@ class glue_solver():
         figs = []
         for i in n_t_sample_indcs:
             figs.append(plot_cone_geometry(self.P, 
-                                    self.center_gram[i], 
+                                    self.Gs[i], 
                                     self.M, 
                                     self.all_t_ks[i],
                                     self.Primals[i],
@@ -232,89 +233,95 @@ class glue_solver():
                 fig.write_image(png_name)
         return figs
     
-
     def make_manifold_plot(self):
-            """
-            Plots anchor points, centers, and axes. 
-            Automatically handles 2D or 3D data.
-            """
+        """
+        Plots anchor points, centers, and axes. 
+        self.anchor_points shape: (n_t, P, N)
+        self.ap_axes shape: (n_t, P, N)
+        self.centers shape: (P, N)
+        - n_t: number of anchor points per class
+        - P: number of classes
+        - N: dimension (2 or 3)
+        """
 
-            # 1. Detect Dimension
-            # Assumes shape (P, M, dim)
-            dim = self.anchor_points.shape[-1]
-            num_classes = self.anchor_points.shape[0]
+        # 1. Detect Dimension and Classes
+        # Shape is (n_t, P, N)
+        n_t, num_classes, dim = self.anchor_points.shape
 
-            # 2. Trace Factory (Smart Wrapper)
-            def make_scatter(coords, **kwargs):
-                # Ensure coords is at least 2D array (1, dim)
-                if coords.ndim == 1:
-                    coords = coords.reshape(1, -1)
-                    
-                common_args = dict(x=coords[:, 0], y=coords[:, 1], **kwargs)
+        # 2. Trace Factory (Smart Wrapper)
+        def make_scatter(coords, **kwargs):
+            # Ensure coords is at least 2D array (1, dim) or (n_t, dim)
+            if coords.ndim == 1:
+                coords = coords.reshape(1, -1)
                 
-                if dim == 3:
-                    return go.Scatter3d(z=coords[:, 2], **common_args)
-                else:
-                    return go.Scatter(**common_args)
-
-            # 3. Initialize Figure
-            fig = go.Figure()
+            common_args = dict(x=coords[:, 0], y=coords[:, 1], **kwargs)
             
-            # Color palette to match P classes
-            colors = px.colors.qualitative.Plotly
-            
-            # 4. Loop over classes (Generalizes AP1, AP2...)
-            for i in range(num_classes):
-                color = colors[i % len(colors)]
-                
-                # A. Anchor Points (Cluster)
-                fig.add_trace(make_scatter(
-                    self.anchor_points[i], 
-                    mode='markers', 
-                    name=f'AP{i+1}',
-                    marker=dict(color=color)
-                ))
-                
-                # B. Centers
-                # self.centers[i] is likely (dim,), factory handles reshape
-                fig.add_trace(make_scatter(
-                    self.centers[i], 
-                    mode='markers', 
-                    name=f'AP{i+1} Center',
-                    marker=dict(size=14, color=color, symbol='x')
-                ))
-                
-                # C. Axes
-                fig.add_trace(make_scatter(
-                    self.ap_axes[i], 
-                    mode='markers', 
-                    name=f'AP{i+1} Axis',
-                    marker=dict(size=14, color=color, opacity=0.5, symbol='circle-open-dot')
-                ))
-
-            # 5. Layout Configuration
-            layout_args = dict(
-                height=600, width=600,
-                title=f"Manifold Anchor Structure ({dim}D)",
-                template="plotly_white",
-                margin=dict(l=40, r=40, b=40, t=60),
-            )
-
             if dim == 3:
-                layout_args['scene'] = dict( # type: ignore
-                    aspectmode='cube', # Essential for 3D geometry
-                    xaxis=dict(title='x'),
-                    yaxis=dict(title='y'),
-                    zaxis=dict(title='z'),
-                )
+                return go.Scatter3d(z=coords[:, 2], **common_args)
             else:
-                layout_args.update(dict(
-                    xaxis=dict(scaleanchor="y", scaleratio=1), # Lock aspect ratio for 2D
-                    yaxis=dict(constrain="domain")
-                )) # type: ignore
+                return go.Scatter(**common_args)
 
-            fig.update_layout(**layout_args) # type: ignore
-            return fig
+        # 3. Initialize Figure
+        fig = go.Figure()
+        
+        # Color palette to match P classes
+        colors = px.colors.qualitative.Plotly
+        
+        # 4. Loop over classes (Iterating over P, which is dim 1)
+        for i in range(num_classes):
+            color = colors[i % len(colors)]
+            
+            # A. Anchor Points (Cluster)
+            # Slicing: [All points, Class i, All spatial coords] -> (n_t, N)
+            class_points = self.anchor_points[:, i, :]
+            
+            fig.add_trace(make_scatter(
+                class_points, 
+                mode='markers', 
+                name=f'AP{i+1}',
+                marker=dict(color=color)
+            ))
+            
+            # B. Centers
+            # Assumes self.centers is shape (P, N)
+            fig.add_trace(make_scatter(
+                self.centers[i], 
+                mode='markers', 
+                name=f'AP{i+1} Center',
+                marker=dict(size=14, color=color, symbol='x')
+            ))
+            
+            # C. Axes
+            fig.add_trace(make_scatter(
+                self.ap_axes[:,i,:], 
+                mode='markers', 
+                name=f'AP{i+1} Axis',
+                marker=dict(size=14, color=color, opacity=0.5, symbol='circle-open-dot')
+            ))
+
+        # 5. Layout Configuration
+        layout_args = dict(
+            height=400, width=600,
+            title=f"Manifold Anchor Structure ({dim}D)",
+            template="plotly_white",
+            margin=dict(l=40, r=40, b=40, t=60),
+        )
+
+        if dim == 3:
+            layout_args['scene'] = dict(  # type: ignore
+                aspectmode='cube', # Essential for 3D geometry
+                xaxis=dict(title='x'),
+                yaxis=dict(title='y'),
+                zaxis=dict(title='z'),
+            )
+        else:
+            layout_args.update(dict(
+                xaxis=dict(scaleanchor="y", scaleratio=1), # Lock aspect ratio for 2D
+                yaxis=dict(constrain="domain")
+            ))  # type: ignore
+
+        fig.update_layout(**layout_args)  # type: ignore
+        return fig
 
 
 @jax.jit
@@ -386,7 +393,6 @@ def plot_cone_geometry(P: int,
 
     # Detect Dimension (2 or 3)
     dim = G.shape[-1]
-
     # Reshape G to (P, M, dim)
     points_per_class = G.reshape(P, M, dim)
 
@@ -498,7 +504,7 @@ def plot_cone_geometry(P: int,
             anchor_np,
             mode='markers',
             name="Anchor Points",
-            marker=dict(size=10, color='black', opacity=0.5, symbol='diamond')
+            marker=dict(size=12, color='black', opacity=0.5, symbol='star')
         ))
 
     # --- 5. Layout Factory ---
