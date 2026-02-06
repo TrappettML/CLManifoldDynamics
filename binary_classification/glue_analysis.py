@@ -1,8 +1,9 @@
+from chex import params_product
 import jax
 import jax.numpy as jnp
 from jaxopt import OSQP
 import matplotlib.pyplot as plt
-from itertools import combinations_with_replacement as cwp
+from itertools import permutations
 import os
 
 
@@ -20,7 +21,7 @@ class glue_solver():
         self.n_t = n_t
         self.A = jnp.eye(self.N)
         self.H = jnp.zeros((self.P*self.M,1))
-        t_key, y_key = jax.random.split(glue_key)
+        t_key, y_key, self.main_key = jax.random.split(glue_key, 3)
         # set up probes and dichotomies
         t_mu = jnp.zeros(self.N)
         t_sigma = jnp.eye(self.N)
@@ -29,43 +30,146 @@ class glue_solver():
         self.all_t_ks = jax.random.multivariate_normal(t_key, t_mu, t_sigma, shape=(self.n_t,))
         self.all_y_ks = self.get_dichotomies(y_key)
 
-    def get_dichotomies(self, key):
+    def get_dichotomies(self, ys_key):
         """Return the dichotomies for P classes for each n_t
             returns a matrix: n_t x P filled with 1/-1 """
+        ychoice_k, yperm_k = jax.random.split(ys_key)
         labels = jnp.array([1,-1])
-        ys_key = jax.random.split(key)
-        potential_ys = jax.random.choice(ys_key, 
+        potential_ys = jax.random.choice(ychoice_k, 
                                         labels, 
-                                        shape=(n_fillers, self.P), 
+                                        shape=(self.n_t, self.P), 
                                         replace=True, 
                                         mode="low")
-        ys_filler = jnp.concatenate(labels*self.P)[:self.P]
+        ys_filler = jnp.concatenate([labels]*self.P)[:self.P]
         non_dichotomy_mask = jnp.abs(jnp.sum(potential_ys, axis=1))==self.P
-        n_fillers = jnp.sum(non_dichotomy_mask)
-        repeated_filler = jnp.repeat(ys_filler, repeat=n_fillers, axis=0)
-        potential_ys = potential_ys.at[:,non_dichotomy_mask].set(repeated_filler)
+        n_fillers = int(jnp.sum(non_dichotomy_mask))
+        repeated_filler = jnp.stack([ys_filler,]*n_fillers, axis=0)
+        shuffled_filler = jax.random.permutation(yperm_k, repeated_filler, axis=1, independent=True)
+        potential_ys = potential_ys.at[non_dichotomy_mask,:].set(shuffled_filler)
         assert potential_ys.shape[0] == self.n_t, "n_t shape for potential ys incorrect"
         assert potential_ys.shape[1] == self.P, "P shape for potnential ys incorrect"
-        return potential_ys
+        return potential_ys 
 
-    def run(self, data, make_plots: bool = False):
+    def get_m_data(self, data: jax.Array) -> jax.Array:
+        """Sample from full data to get M data points
+        data shape: (P classes, num Points, N features)"""
+        m_key, self.main_key = jax.random.split(self.main_key)
+        m_keys = jax.random.split(m_key, self.P)
+        n_data_points = data.shape[1]
+        def sample_m(k):
+            return jax.random.choice(k, n_data_points, shape=(self.M,), replace=False)
+        m_data_axes = jax.vmap(sample_m)(m_keys)
+        m_data = jax.vmap(lambda d, indcs: d[indcs,:])(data, m_data_axes)
+        assert m_data.shape[0] == self.P, "M_data wrong dim 0 size"
+        assert m_data.shape[1] == self.M, "M_data wrong dim 1 size"
+        assert m_data.shape[2] == self.N, "M_data wrong dim 2 size"
+        return m_data
+
+    def run(self, data: jax.Array, make_plots: bool = False):
         """runs glue solver: take plots, make G, 
         calc anchor point 
         -> ap centers, axis -> capacity, dim, radius, etc.
         Plot if true, if dimensions are larger than 3, 
         embed them using PCA, then plot
+        inputs: jax array, shape: (P,D,N), where D is the number of datapoints in the data
         """
+        assert data.shape[0] == self.P, "Data has incorrect classes"
+        assert data.shape[2] == self.N, "Data has incorrect features"
+        assert data.shape[1] >= self.M, "Data has insufficient data points"
+        m_data = self.get_m_data(data)
+        ap_data = self.sample_anchor_points(m_data) # (aps, Gs, primals), shapes: ((n_t, P,N),(n_t,P*M,N),(n_t,N,1))
+        S_0s, G_0 = self.get_ap_centers(ap_data[0])
+        s_1ks, t_1k, G_1k = self.get_aps_axis_var(S_0s)
+
+
         pass
 
-    def sample_anchor_points(self, data):
+    def sample_anchor_points(self, m_data: jax.Array):
         """Using the values in self, vmap over inner single AP function 
-        to calculate AP for each n_t. Save the APs, w, primal, Gs, """
+        to calculate AP for each n_t. 
+        input: m_data: shape: P,M,N
+        Return: APs, w, primal, Gs, """
+        qp = OSQP(tol=1e-4)
+        def sample_single_anchor_point(y_k: jax.Array, t_k: jax.Array) -> jax.Array:
+            "Single anchor point function, calclulate anchor points for t and y "
+            "return primals, G and anchorpoints"
+            y_k = jnp.expand_dims(y_k, axis=1)
+            t_k = jnp.expand_dims(t_k, axis=1)
+            q_t = -1 * t_k
+            G = jnp.concatenate(jax.vmap(lambda a,b: a*b, in_axes=(0,0))(y_k, m_data),axis=0)
+            sol = qp.run(params_obj=(self.A, q_t), params_eq=None, params_ineq=(G,self.H)).params
+            primal = sol.primal
+            z_duals = sol.dual_ineq
+            G_p_x_m = G.reshape(self.P,self.M,-1)
+            lambda_p_x_m = z_duals.squeeze().reshape(self.P, self.M)
+            ap_top = jnp.sum((lambda_p_x_m.T * G_p_x_m.T).T, axis=1) # resulting shape: PxN
+            ap_bottom = jnp.sum(lambda_p_x_m, axis=1) # resulting shape: P
+            anchor_points = jax.vmap(safe_divide, in_axes=(0,0))(ap_top, ap_bottom) # resulting shape: PxN
+            return (anchor_points, G, primal)
+        
+        results = jax.vmap(sample_single_anchor_point,in_axes=(0,0))(self.all_y_ks, self.all_t_ks)
+        return results
 
-        def sample_single_anchor_point():
-            pass
+    def get_ap_centers(self, aps: jax.Array):
+        """aps shape: (n_t, P, N)"""
+        s_0 = jnp.mean(aps, axis=0) # shapes (n_t,P,N) -> (P,N) # anchor centers
+        G_0 = s_0 @ s_0.T # shape: (PxN) @ (PxN).T = (P,P) # center gramm matrix
+        return s_0, G_0
+    
+    def get_aps_axis_var(self, aps: jax.Array, centers: jax.Array):
+        # s_1ks.shape (n_t,P,N) = apshape: (n_t,P,N) x centers:(P,N)
+        s_1ks = jax.vmap(lambda x,y: x-y, in_axes=(1,0))(aps, centers)
+        # t_1ks.shape (n_t,P) = s_1ks shape: (n_t,P,N) x all_t_ks.shape: (n_t, N)
+        t_1ks = jax.vmap(lambda x,y: x@y.T, in_axes=(0,0))(s_1ks, self.all_t_ks)
+        # G_1k.shape (n_t, P, P) = s_1ks shape:(n_t,P,N) {(P,N)x(N,P)}
+        G_1k = jax.vmap(lambda x: x@x.T, in_axes=(0))(s_1ks)
+        return s_1ks, t_1ks, G_1k
 
+    def get_radius(self, t_1ks, G_1ks, G_0):
+        def rad_top(t,g_1):
+            return t.T @ jnp.linalg.pinv(g_1+G_0) @ t
+        def rad_bot(t,g_1):
+            return t.T @ jnp.linalg.pinv(g_1 + (g_1 @ jnp.linalg.pinv(G_0) @ g_1)) @ t
+        radius = jnp.sqrt(jnp.mean(jax.vmap(lambda t,g: rad_top(t,g)/rad_bot(t,g), in_axes=(0,0))(t_1ks, G_1ks)))
+        return radius
+    
+    def get_center_alignment(self, axis_centers):
+        P_indices = jnp.array(list(permutations(range(self.P), r=2)))
+        inner_f = lambda ac,pi: (ac[pi[0]].T @ ac[pi[1]])/(jnp.linalg.norm(ac[pi[0]]) * jnp.linalg.norm(ac[pi[1]]))
+        center_alignment = 1/(self.P * (self.P -1)) * jnp.sum(
+            jax.vmap(inner_f, 
+                        in_axes=(None,0))(axis_centers, P_indices))
+        return center_alignment
+    
+    def manifold_geometries(self, aps, ap_centers, ap_axes, probes, t_1ks, center_gram, axis_gram):
+        capacity = (1/self.P * jnp.mean(jax.vmap(lambda s,t: (s@t.T).T @ jnp.linalg.pinv(s@s.T) @ (s@t.T), in_axes=(0,0))(aps, probes)))**(-1)
+        dimension = (1/self.P * jnp.mean(jax.vmap(lambda t,g: t.T @ jnp.linalg.pinv(g) @ t, in_axes=(0,0))(t_1ks, axis_gram)))
+        radius = self.get_radius(t_1ks, axis_gram, center_gram)
+        center_align = self.get_center_alignment(ap_centers)
 
-        pass
+        return capacity, dimension, radius, center_align, # axis_align, # center_axis_align
+
+def safe_divide(numerator, denominator, fill_value=0.0):
+    """
+    Performs division using jax.lax.div, returning fill_value where denominator is 0.
+    """
+    # 1. Create a mask where the denominator is NOT zero
+    # We assume standard float comparison; for integers, logic is identical.
+    mask = jax.lax.ne(denominator, 0.0)
+    
+    # 2. Create a "safe" denominator. 
+    # We replace 0 with 1 to avoid generating NaNs/Infs during the calculation.
+    # This is safer for gradients than simply dividing and masking afterwards.
+    safe_denominator = jax.lax.select(mask, denominator, jnp.ones_like(denominator))
+    
+    # 3. Perform the raw division using the requested lax primitive
+    raw_div = jax.lax.div(numerator, safe_denominator)
+    
+    # 4. Select the division result where mask is True, otherwise use fill_value
+    # Ensure fill_value matches the shape/type of the result
+    safe_fill = jnp.full_like(raw_div, fill_value)
+    
+    return jax.lax.select(mask, raw_div, safe_fill)
 
 # --- JAX-JIT Compiled Optimization Kernels ---
 
