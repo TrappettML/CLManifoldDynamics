@@ -29,6 +29,7 @@ class glue_solver():
         # use glue key to generate t and y keys
         self.all_t_ks = jax.random.multivariate_normal(t_key, t_mu, t_sigma, shape=(self.n_t,))
         self.all_y_ks = self.get_dichotomies(y_key)
+        self.P_indices = jnp.array(list(permutations(range(self.P), r=2)))
 
     def get_dichotomies(self, ys_key):
         """Return the dichotomies for P classes for each n_t
@@ -77,12 +78,14 @@ class glue_solver():
         assert data.shape[2] == self.N, "Data has incorrect features"
         assert data.shape[1] >= self.M, "Data has insufficient data points"
         m_data = self.get_m_data(data)
-        ap_data = self.sample_anchor_points(m_data) # (aps, Gs, primals), shapes: ((n_t, P,N),(n_t,P*M,N),(n_t,N,1))
-        S_0s, G_0 = self.get_ap_centers(ap_data[0])
-        s_1ks, t_1k, G_1k = self.get_aps_axis_var(S_0s)
+        aps, Gs, primals = self.sample_anchor_points(m_data) # (aps, Gs, primals), shapes: ((n_t, P,N),(n_t,P*M,N),(n_t,N,1))
+        S_0s, G_0 = self.get_ap_centers(aps)
+        s_1ks, t_1k, G_1k = self.get_aps_axis_var(aps, S_0s)
+        geometries = self.manifold_geometries(aps, S_0s, s_1ks, self.all_t_ks, t_1k, G_0, G_1k)
+        # other logic for plotting
+        return geometries
+    
 
-
-        pass
 
     def sample_anchor_points(self, m_data: jax.Array):
         """Using the values in self, vmap over inner single AP function 
@@ -107,8 +110,8 @@ class glue_solver():
             anchor_points = jax.vmap(safe_divide, in_axes=(0,0))(ap_top, ap_bottom) # resulting shape: PxN
             return (anchor_points, G, primal)
         
-        results = jax.vmap(sample_single_anchor_point,in_axes=(0,0))(self.all_y_ks, self.all_t_ks)
-        return results
+        anchor_points, Gs, Primals = jax.vmap(sample_single_anchor_point,in_axes=(0,0))(self.all_y_ks, self.all_t_ks)
+        return anchor_points, Gs, Primals
 
     def get_ap_centers(self, aps: jax.Array):
         """aps shape: (n_t, P, N)"""
@@ -117,8 +120,8 @@ class glue_solver():
         return s_0, G_0
     
     def get_aps_axis_var(self, aps: jax.Array, centers: jax.Array):
-        # s_1ks.shape (n_t,P,N) = apshape: (n_t,P,N) x centers:(P,N)
-        s_1ks = jax.vmap(lambda x,y: x-y, in_axes=(1,0))(aps, centers)
+        # s_1ks.shape (P,n_t,N) = apshape: (n_t,P,N) x centers:(P,N) // vmapped over P, makes P first index, reshape
+        s_1ks = jax.vmap(lambda x,y: x-y, in_axes=(1,0))(aps, centers).swapaxes(1,0) # swaps to (n_t, P, N)
         # t_1ks.shape (n_t,P) = s_1ks shape: (n_t,P,N) x all_t_ks.shape: (n_t, N)
         t_1ks = jax.vmap(lambda x,y: x@y.T, in_axes=(0,0))(s_1ks, self.all_t_ks)
         # G_1k.shape (n_t, P, P) = s_1ks shape:(n_t,P,N) {(P,N)x(N,P)}
@@ -134,21 +137,58 @@ class glue_solver():
         return radius
     
     def get_center_alignment(self, axis_centers):
-        P_indices = jnp.array(list(permutations(range(self.P), r=2)))
         inner_f = lambda ac,pi: (ac[pi[0]].T @ ac[pi[1]])/(jnp.linalg.norm(ac[pi[0]]) * jnp.linalg.norm(ac[pi[1]]))
         center_alignment = 1/(self.P * (self.P -1)) * jnp.sum(
             jax.vmap(inner_f, 
-                        in_axes=(None,0))(axis_centers, P_indices))
+                        in_axes=(None,0))(axis_centers, self.P_indices))
         return center_alignment
+    
+    def get_axis_alignment(self, all_aps_axis):
+        # all_aps_axis shape: (n_t,P,N)
+        axis_alignment = 1/(self.P*(self.P-1)) * jnp.sum(
+            jax.vmap(
+                lambda x, pid: axis_align_nt_sum(x[:,pid[0],:],x[:,pid[1],:]),
+                in_axes=(None, 0))
+                (all_aps_axis, self.P_indices)
+                )
+        return axis_alignment
+
+    def get_center_axis_alignment(self, aps_centers, aps_axes):
+        center_axis_alignment = 1/(self.P*(self.P-1)) * jnp.sum(
+            jax.vmap(
+                lambda x,y, pid: center_axis_align_nt_sum(x[pid[0]],y[:, pid[1], :]),
+                in_axes=(None, None, 0))
+                (aps_centers, aps_axes, self.P_indices)
+                )
+        return center_axis_alignment
     
     def manifold_geometries(self, aps, ap_centers, ap_axes, probes, t_1ks, center_gram, axis_gram):
         capacity = (1/self.P * jnp.mean(jax.vmap(lambda s,t: (s@t.T).T @ jnp.linalg.pinv(s@s.T) @ (s@t.T), in_axes=(0,0))(aps, probes)))**(-1)
         dimension = (1/self.P * jnp.mean(jax.vmap(lambda t,g: t.T @ jnp.linalg.pinv(g) @ t, in_axes=(0,0))(t_1ks, axis_gram)))
         radius = self.get_radius(t_1ks, axis_gram, center_gram)
         center_align = self.get_center_alignment(ap_centers)
+        axis_align = self.get_axis_alignment(ap_axes)
+        center_axis_align = self.get_center_axis_alignment(ap_centers, ap_axes)
+        return capacity, dimension, radius, center_align, axis_align, center_axis_align
 
-        return capacity, dimension, radius, center_align, # axis_align, # center_axis_align
+@jax.jit
+def axis_align_nt_sum(s_ik, s_jk):
+    # s_*ks shape: (n_t, N)
+    top = lambda x,y: x@y.T # along N axis
+    bot = lambda x,y: jnp.linalg.norm(x) * jnp.linalg.norm(y)
+    frac = lambda x,y: top(x,y)/bot(x,y)
+    return jnp.mean(jax.vmap(frac, in_axes=(0,0))(s_ik, s_jk))
 
+@jax.jit
+def center_axis_align_nt_sum(s_0i, s_kj):
+    # s_ks shape: (n_t, N)
+    # s_0j shape: (1,N)
+    top = lambda x,y: x@y.T # along N axis
+    bot = lambda x,y: jnp.linalg.norm(x) * jnp.linalg.norm(y)
+    frac = lambda x,y: top(x,y)/bot(x,y)
+    return jnp.mean(jax.vmap(frac, in_axes=(None, 0))(s_0i, s_kj))
+
+@jax.jit
 def safe_divide(numerator, denominator, fill_value=0.0):
     """
     Performs division using jax.lax.div, returning fill_value where denominator is 0.
