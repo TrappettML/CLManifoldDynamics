@@ -49,17 +49,19 @@ class glue_solver():
         ys_filler = jnp.concatenate([labels]*self.P)[:self.P]
         non_dichotomy_mask = jnp.abs(jnp.sum(potential_ys, axis=1))==self.P
         n_fillers = int(jnp.sum(non_dichotomy_mask))
-        repeated_filler = jnp.stack([ys_filler,]*n_fillers, axis=0)
-        shuffled_filler = jax.random.permutation(yperm_k, repeated_filler, axis=1, independent=True)
-        potential_ys = potential_ys.at[non_dichotomy_mask,:].set(shuffled_filler)
+        if n_fillers > 0:
+            repeated_filler = jnp.stack([ys_filler,]*n_fillers, axis=0)
+            shuffled_filler = jax.random.permutation(yperm_k, repeated_filler, axis=1, independent=True)
+            potential_ys = potential_ys.at[non_dichotomy_mask,:].set(shuffled_filler)
         assert potential_ys.shape[0] == self.n_t, "n_t shape for potential ys incorrect"
         assert potential_ys.shape[1] == self.P, "P shape for potnential ys incorrect"
         return potential_ys 
     
-
-    def get_m_data(self, data: jax.Array) -> jax.Array:
+    def get_m_data(self, data) -> jax.Array:
         """Sample from full data to get M data points
         data shape: (P classes, num Points, N features)"""
+        if type(data) != jax.Array:
+            data = jnp.array(data)
         m_key, self.main_key = jax.random.split(self.main_key)
         m_keys = jax.random.split(m_key, self.P)
         n_data_points = data.shape[1]
@@ -72,7 +74,7 @@ class glue_solver():
         assert m_data.shape[2] == self.N, "M_data wrong dim 2 size"
         return m_data
 
-    def run(self, data: jax.Array):
+    def run(self, data):
         """runs glue solver: take plots, make G, 
         calc anchor point 
         -> ap centers, axis -> capacity, dim, radius, etc.
@@ -296,7 +298,7 @@ class glue_solver():
                 self.ap_axes[:,i,:], 
                 mode='markers', 
                 name=f'AP{i+1} Axis',
-                marker=dict(size=14, color=color, opacity=0.5, symbol='circle-open-dot')
+                marker=dict(size=14, color=color, opacity=0.5, symbol='circle-open')
             ))
 
         # 5. Layout Configuration
@@ -490,7 +492,7 @@ def plot_cone_geometry(P: int,
             line_data,
             mode='lines+markers',
             line=dict(color=color, width=4),
-            marker=dict(size=4, color=color),
+            marker=dict(size=10, color=color, symbol='circle'),
             name=name
         ))
 
@@ -504,7 +506,7 @@ def plot_cone_geometry(P: int,
             anchor_np,
             mode='markers',
             name="Anchor Points",
-            marker=dict(size=12, color='black', opacity=0.5, symbol='star')
+            marker=dict(size=12, color='black', opacity=0.5, symbol='cross')
         ))
 
     # --- 5. Layout Factory ---

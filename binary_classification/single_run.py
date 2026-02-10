@@ -17,7 +17,7 @@ from expert_trainer import train_single_expert
 from models import CLHook
 import plastic_analysis
 import cl_analysis
-import glue_analysis
+import glue_module.glue_module.glue_analysis as glue_analysis
 
 
 class LoggerHook(CLHook):
