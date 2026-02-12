@@ -9,324 +9,186 @@ import plotly.graph_objects as go
 import plotly.express as px
 import os
 from random import sample
+from functools import partial
+
+@jax.jit(static_argnames=('P', 'M', 'N', 'n_t', 'qp_solver'))
+def run_glue_solver(key, data: jax.Array, P:int, M:int, N:int, n_t:int, qp_solver):
+    m_key, t_key, y_key = jax.random.split(key, 3)
+    A = jnp.eye(N)
+    H = jnp.zeros((P*M,1))
+    m_data = get_m_data(m_key, data, P, M, N)
+    all_ts = get_all_ts(t_key, N, n_t)
+    all_ys = get_all_ys(y_key, P, n_t)
+    P_indices = jnp.array(list(permutations(range(P), r=2)))
+    # solve the qp equation
+    anchor_points, Gs, Primals = sample_anchor_points(m_data, all_ts, all_ys, A, H, qp_solver) # (aps, Gs, primals), shapes: ((n_t, P,N),(n_t,P*M,N),(n_t,N,1))
+    centers, center_gram = get_ap_centers(anchor_points)
+    ap_axes, t_1ks, axes_gram = get_aps_axis_var(anchor_points, centers, all_ts)
+
+    # manifold geometries
+    capacity = (1/P * jnp.mean(jax.vmap(lambda s,t: (s@t.T).T @ jnp.linalg.pinv(s@s.T) @ (s@t.T), in_axes=(0,0))(anchor_points, all_ts)))**(-1)
+    dimension = (1/P * jnp.mean(jax.vmap(lambda t,g: t.T @ jnp.linalg.pinv(g) @ t, in_axes=(0,0))(t_1ks, axes_gram)))
+    radius = get_radius(t_1ks, axes_gram, center_gram)
+    center_align = get_center_alignment(centers, P, P_indices)
+    axis_align = get_axis_alignment(ap_axes, P, P_indices)
+    center_axis_align = get_center_axis_alignment(centers, ap_axes, P, P_indices)
+    approx_capacity = (1 + radius**(-2))/dimension
+    glue_metrics = (capacity, dimension, radius, center_align, axis_align, center_axis_align, approx_capacity)
+    plotting_inputs = (M, anchor_points, Gs, all_ys, all_ts, Primals, centers, ap_axes)
+    return glue_metrics, plotting_inputs
+
+def get_m_data(key, data: jax.Array, P: int, M, N) -> jax.Array:
+    """Sample from full data to get M data points
+    data shape: (P classes, num Points, N features)"""
+    m_keys = jax.random.split(key, P)
+    n_data_points = data.shape[1]
+    def sample_m(k):
+        return jax.random.choice(k, n_data_points, shape=(M,), replace=False)
+    m_data_axes = jax.vmap(sample_m)(m_keys)
+    m_data = jax.vmap(lambda d, indcs: d[indcs,:])(data, m_data_axes)
+    assert m_data.shape[0] == P, "M_data wrong dim 0 size"
+    assert m_data.shape[1] == M, "M_data wrong dim 1 size"
+    assert m_data.shape[2] == N, "M_data wrong dim 2 size"
+    return m_data
 
 
+def get_all_ts(key, N: int, n_t: int):
+    t_mu = jnp.zeros(N)
+    t_sigma = jnp.eye(N)
+    return jax.random.multivariate_normal(key, t_mu, t_sigma, shape=(n_t,))
 
-class glue_solver():
-    def __init__(self, glue_key, 
-                 P_point_clouds: int, 
-                 m_points: int, 
-                 n_dim_space: int, 
-                 n_t: int):
-        """Take the hyperparameters and setup the t and y values"""
-        self.P = P_point_clouds
-        self.M = m_points
-        self.N = n_dim_space
-        self.n_t = n_t
-        self.A = jnp.eye(self.N)
-        self.H = jnp.zeros((self.P*self.M,1))
-        t_key, y_key, self.main_key = jax.random.split(glue_key, 3)
-        # set up probes and dichotomies
-        t_mu = jnp.zeros(self.N)
-        t_sigma = jnp.eye(self.N)
 
-        # use glue key to generate t and y keys
-        self.all_t_ks = jax.random.multivariate_normal(t_key, t_mu, t_sigma, shape=(self.n_t,))
-        self.all_y_ks = self.get_dichotomies(y_key)
-        self.P_indices = jnp.array(list(permutations(range(self.P), r=2)))
-        self._sample_jit = jax.jit(self.sample_anchor_points)
+def get_all_ys(key, P:int, n_t: int):
+    """"inputs:
+        key, P, n_t, y_type
+        y_type: one of ['one_v_rest', 'entropy']"""
+    potential_ys = jnp.full((n_t, P), -1)
+    one_indices = jax.random.randint(key, shape=(n_t,), minval=0, maxval=P)
+    row_indices = jnp.arange(n_t)
+    potential_ys = potential_ys.at[row_indices, one_indices].set(1)
+    return potential_ys
 
-    def get_dichotomies(self, ys_key):
-        """Return the dichotomies for P classes for each n_t
-            returns a matrix: n_t x P filled with 1/-1 """
-        ychoice_k, yperm_k = jax.random.split(ys_key)
-        labels = jnp.array([1,-1])
-        potential_ys = jax.random.choice(ychoice_k, 
-                                        labels, 
-                                        shape=(self.n_t, self.P), 
-                                        replace=True, 
-                                        mode="low")
-        ys_filler = jnp.concatenate([labels]*self.P)[:self.P]
-        non_dichotomy_mask = jnp.abs(jnp.sum(potential_ys, axis=1))==self.P
-        n_fillers = int(jnp.sum(non_dichotomy_mask))
-        if n_fillers > 0:
-            repeated_filler = jnp.stack([ys_filler,]*n_fillers, axis=0)
-            shuffled_filler = jax.random.permutation(yperm_k, repeated_filler, axis=1, independent=True)
-            potential_ys = potential_ys.at[non_dichotomy_mask,:].set(shuffled_filler)
-        assert potential_ys.shape[0] == self.n_t, "n_t shape for potential ys incorrect"
-        assert potential_ys.shape[1] == self.P, "P shape for potnential ys incorrect"
-        return potential_ys 
-    
-    def get_m_data(self, data) -> jax.Array:
-        """Sample from full data to get M data points
-        data shape: (P classes, num Points, N features)"""
-        if type(data) != jax.Array:
-            data = jnp.array(data)
-        m_key, self.main_key = jax.random.split(self.main_key)
-        m_keys = jax.random.split(m_key, self.P)
-        n_data_points = data.shape[1]
-        def sample_m(k):
-            return jax.random.choice(k, n_data_points, shape=(self.M,), replace=False)
-        m_data_axes = jax.vmap(sample_m)(m_keys)
-        m_data = jax.vmap(lambda d, indcs: d[indcs,:])(data, m_data_axes)
-        assert m_data.shape[0] == self.P, "M_data wrong dim 0 size"
-        assert m_data.shape[1] == self.M, "M_data wrong dim 1 size"
-        assert m_data.shape[2] == self.N, "M_data wrong dim 2 size"
-        return m_data
 
-    def run(self, data):
-        """runs glue solver: take plots, make G, 
-        calc anchor point 
-        -> ap centers, axis -> capacity, dim, radius, etc.
-        Plot if true, if dimensions are larger than 3, 
-        embed them using PCA, then plot
-        inputs: jax array, shape: (P,D,N), where D is the number of datapoints in the data
-        """
-        assert data.shape[0] == self.P, "Data has incorrect P classes"
-        assert data.shape[1] >= self.M, "Data has insufficient M data points"
-        assert data.shape[2] == self.N, "Data has incorrect N features"
+def get_radius(t_1ks, G_1ks, G_0):
+    def rad_top(t,g_1):
+        return t.T @ jnp.linalg.pinv(g_1+G_0) @ t
+    def rad_bot(t,g_1):
+        return t.T @ jnp.linalg.pinv(g_1 + (g_1 @ jnp.linalg.pinv(G_0) @ g_1)) @ t
+    # for neural data chou2025a
+    top_values = jax.vmap(rad_top)(t_1ks, G_1ks)
+    bot_values = jax.vmap(rad_bot)(t_1ks, G_1ks)
+    mean_top = jnp.mean(top_values)
+    mean_bot = jnp.mean(bot_values)
+    radius = jnp.sqrt(mean_top/mean_bot)
+    # for neural networks representations
+    # radius = jnp.sqrt(jnp.mean(jax.vmap(lambda t,g: rad_top(t,g)/rad_bot(t,g), in_axes=(0,0))(t_1ks, G_1ks)))
+    return radius
 
-        m_data = self.get_m_data(data)
-        anchor_points, Gs, Primals = self._sample_jit(m_data) # (aps, Gs, primals), shapes: ((n_t, P,N),(n_t,P*M,N),(n_t,N,1))
-        self.anchor_points = anchor_points
-        self.Gs = Gs
-        self.Primals = Primals
-        self.get_ap_centers()
-        self.get_aps_axis_var()
-        geometries = self.manifold_geometries()
-        self.geometries = geometries
-        return geometries
-    
-    def sample_anchor_points(self, m_data: jax.Array):
-        """Using the values in self, vmap over inner single AP function 
-        to calculate AP for each n_t. 
-        input: m_data: shape: P,M,N
-        Return: APs, w, primal, Gs, """
-        qp = OSQP(tol=1e-4)
-        @jax.jit
-        def sample_single_anchor_point(y_k: jax.Array, t_k: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
-            "Single anchor point function, calclulate anchor points for t and y "
-            "return primals, G and anchorpoints"
-            y_k = jnp.expand_dims(y_k, axis=1)
-            t_k = jnp.expand_dims(t_k, axis=1)
-            q_t = -1 * t_k
-            G = jnp.concatenate(jax.vmap(lambda a,b: a*b, in_axes=(0,0))(y_k, m_data),axis=0)
-            sol = qp.run(params_obj=(self.A, q_t), params_eq=None, params_ineq=(G,self.H)).params
-            primal = sol.primal
-            z_duals = sol.dual_ineq
-            G_p_x_m = G.reshape(self.P,self.M,-1)
-            lambda_p_x_m = z_duals.squeeze().reshape(self.P, self.M)
-            ap_top = jnp.sum((lambda_p_x_m.T * G_p_x_m.T).T, axis=1) # resulting shape: PxN
-            ap_bottom = jnp.sum(lambda_p_x_m, axis=1) # resulting shape: P
-            anchor_points = jax.vmap(safe_divide, in_axes=(0,0))(ap_top, ap_bottom) # resulting shape: PxN
-            return (anchor_points, G, primal)
-        # all shapes: [(n_t,P,N), (n_t, P, P), (n_t, N)]
-        anchor_points, Gs, Primals = jax.vmap(sample_single_anchor_point,in_axes=(0,0))(self.all_y_ks, self.all_t_ks)
-        return anchor_points, Gs, Primals
 
-    def get_ap_centers(self):
-        """aps shape: (n_t, P, N)"""
-        s_0 = jnp.mean(self.anchor_points, axis=0) # shapes (n_t,P,N) -> (P,N) # anchor centers
-        G_0 = s_0 @ s_0.T # shape: (PxN) @ (PxN).T = (P,P) # center gramm matrix
-        self.centers = s_0
-        self.center_gram = G_0
-        return s_0, G_0
-    
-    def get_aps_axis_var(self):
-        # s_1ks.shape = apshape: (n_t,P,N) x centers:(P,N) // vmapped over P, makes P first index, reshape
-        s_1ks = jax.vmap(lambda x,y: x-y, in_axes=(1,0))(self.anchor_points, self.centers).swapaxes(1,0) # swaps to (n_t, P, N)
-        # t_1ks.shape (n_t,P) = s_1ks shape: (n_t,P,N) x all_t_ks.shape: (n_t, N)
-        t_1ks = jax.vmap(lambda x,y: x@y.T, in_axes=(0,0))(s_1ks, self.all_t_ks)
-        # G_1k.shape (n_t, P, P) = s_1ks shape:(n_t,P,N) {(P,N)x(N,P)}
-        G_1k = jax.vmap(lambda x: x@x.T, in_axes=(0))(s_1ks)
-        self.ap_axes = s_1ks
-        self.probe_axes_projs = t_1ks
-        self.axes_gram = G_1k
-        return s_1ks, t_1ks, G_1k
+def get_center_alignment(axis_centers, P, P_indices):
+    inner_f = lambda ac,pi: (ac[pi[0]].T @ ac[pi[1]])/(jnp.linalg.norm(ac[pi[0]]) * jnp.linalg.norm(ac[pi[1]]))
+    center_alignment = 1/(P * (P -1)) * jnp.sum(
+        jax.vmap(inner_f, 
+                    in_axes=(None,0))(axis_centers, P_indices))
+    return center_alignment
 
-    def get_radius(self, t_1ks, G_1ks, G_0):
-        def rad_top(t,g_1):
-            return t.T @ jnp.linalg.pinv(g_1+G_0) @ t
-        def rad_bot(t,g_1):
-            return t.T @ jnp.linalg.pinv(g_1 + (g_1 @ jnp.linalg.pinv(G_0) @ g_1)) @ t
-        radius = jnp.sqrt(jnp.mean(jax.vmap(lambda t,g: rad_top(t,g)/rad_bot(t,g), in_axes=(0,0))(t_1ks, G_1ks)))
-        return radius
-    
-    def get_center_alignment(self, axis_centers):
-        inner_f = lambda ac,pi: (ac[pi[0]].T @ ac[pi[1]])/(jnp.linalg.norm(ac[pi[0]]) * jnp.linalg.norm(ac[pi[1]]))
-        center_alignment = 1/(self.P * (self.P -1)) * jnp.sum(
-            jax.vmap(inner_f, 
-                        in_axes=(None,0))(axis_centers, self.P_indices))
-        return center_alignment
-    
-    def get_axis_alignment(self, all_aps_axis):
-        # all_aps_axis shape: (n_t,P,N)
-        axis_alignment = 1/(self.P*(self.P-1)) * jnp.sum(
-            jax.vmap(
-                lambda x, pid: axis_align_nt_sum(x[:,pid[0],:],x[:,pid[1],:]),
-                in_axes=(None, 0))
-                (all_aps_axis, self.P_indices)
-                )
-        return axis_alignment
 
-    def get_center_axis_alignment(self, aps_centers, aps_axes):
-        center_axis_alignment = 1/(self.P*(self.P-1)) * jnp.sum(
-            jax.vmap(
-                lambda x,y, pid: center_axis_align_nt_sum(x[pid[0]],y[:, pid[1], :]),
-                in_axes=(None, None, 0))
-                (aps_centers, aps_axes, self.P_indices)
-                )
-        return center_axis_alignment
-    
-    def manifold_geometries(self):
-        capacity = (1/self.P * jnp.mean(jax.vmap(lambda s,t: (s@t.T).T @ jnp.linalg.pinv(s@s.T) @ (s@t.T), in_axes=(0,0))(self.anchor_points, self.all_t_ks)))**(-1)
-        dimension = (1/self.P * jnp.mean(jax.vmap(lambda t,g: t.T @ jnp.linalg.pinv(g) @ t, in_axes=(0,0))(self.probe_axes_projs, self.axes_gram)))
-        radius = self.get_radius(self.probe_axes_projs, self.axes_gram, self.center_gram)
-        center_align = self.get_center_alignment(self.centers)
-        axis_align = self.get_axis_alignment(self.ap_axes)
-        center_axis_align = self.get_center_axis_alignment(self.centers, self.ap_axes)
-        approx_capacity = (1 + radius**(-2))/dimension
-        return capacity, dimension, radius, center_align, axis_align, center_axis_align, approx_capacity
-
-    def simulated_capacity(self):
-        """Brute force method for finding capacity, should align with glue/simulated capacity"""
-
-        return
-
-    def individual_geometries(self, *args, **kwargs):
-        """use chou2025a line 1552 equations for calculating individual class dimensions, indexing into P
-        Make sure to always align with the P so as to track correct classes"""
-        pass
-
-    def make_plots(self, plots_path: str| None = None):
-        # Make 3 cone plots, 3 columns 1 row
-        # Make 1 anchor point plot, APs, centers and axis maybe with points
-        # want logic to handle N= 2 or 3 and TODO: if more than do PCA to embed. 
-        # Ensure directory exists
-        if plots_path:
-            base_dir = os.path.dirname(plots_path)
-            if base_dir and not os.path.exists(base_dir):
-                os.makedirs(base_dir)
-
-            html_filename = f"{plots_path}/manifold_plots.html"
-
-        k = min(3, self.n_t)
-        n_t_sample_indcs = sample(range(self.n_t), k)
-        js_str = 'cdn'
-        figs = []
-        for i in n_t_sample_indcs:
-            figs.append(plot_cone_geometry(self.P, 
-                                    self.Gs[i], 
-                                    self.M, 
-                                    self.all_t_ks[i],
-                                    self.Primals[i],
-                                    self.anchor_points[i],
-                                    title=f"Geometries for n_t: {i}"))
-            
-        figs.append(self.make_manifold_plot())
-        if plots_path:
-            for fig in figs:
-                # html plot
-                with open(html_filename, 'w') as f:
-                    f.write(fig.to_html(full_html=False, include_plotlyjs=js_str))
-                    js_str = False
-                # png plot
-                png_name = f"{plots_path}/manifold_plot_n_t{i}.png"
-                fig.write_image(png_name)
-        return figs
-    
-    def make_manifold_plot(self):
-        """
-        Plots anchor points, centers, and axes. 
-        self.anchor_points shape: (n_t, P, N)
-        self.ap_axes shape: (n_t, P, N)
-        self.centers shape: (P, N)
-        - n_t: number of anchor points per class
-        - P: number of classes
-        - N: dimension (2 or 3)
-        """
-
-        # 1. Detect Dimension and Classes
-        # Shape is (n_t, P, N)
-        n_t, num_classes, dim = self.anchor_points.shape
-
-        # 2. Trace Factory (Smart Wrapper)
-        def make_scatter(coords, **kwargs):
-            # Ensure coords is at least 2D array (1, dim) or (n_t, dim)
-            if coords.ndim == 1:
-                coords = coords.reshape(1, -1)
-                
-            common_args = dict(x=coords[:, 0], y=coords[:, 1], **kwargs)
-            
-            if dim == 3:
-                return go.Scatter3d(z=coords[:, 2], **common_args)
-            else:
-                return go.Scatter(**common_args)
-
-        # 3. Initialize Figure
-        fig = go.Figure()
-        
-        # Color palette to match P classes
-        colors = px.colors.qualitative.Plotly
-        
-        # 4. Loop over classes (Iterating over P, which is dim 1)
-        for i in range(num_classes):
-            color = colors[i % len(colors)]
-            
-            # A. Anchor Points (Cluster)
-            # Slicing: [All points, Class i, All spatial coords] -> (n_t, N)
-            class_points = self.anchor_points[:, i, :]
-            
-            fig.add_trace(make_scatter(
-                class_points, 
-                mode='markers', 
-                name=f'AP{i+1}',
-                marker=dict(color=color)
-            ))
-            
-            # B. Centers
-            # Assumes self.centers is shape (P, N)
-            fig.add_trace(make_scatter(
-                self.centers[i], 
-                mode='markers', 
-                name=f'AP{i+1} Center',
-                marker=dict(size=14, color=color, symbol='x')
-            ))
-            
-            # C. Axes
-            fig.add_trace(make_scatter(
-                self.ap_axes[:,i,:], 
-                mode='markers', 
-                name=f'AP{i+1} Axis',
-                marker=dict(size=14, color=color, opacity=0.5, symbol='circle-open')
-            ))
-
-        # 5. Layout Configuration
-        layout_args = dict(
-            height=400, width=600,
-            title=f"Manifold Anchor Structure ({dim}D)",
-            template="plotly_white",
-            margin=dict(l=40, r=40, b=40, t=60),
-        )
-
-        if dim == 3:
-            layout_args['scene'] = dict(  # type: ignore
-                aspectmode='cube', # Essential for 3D geometry
-                xaxis=dict(title='x'),
-                yaxis=dict(title='y'),
-                zaxis=dict(title='z'),
+def get_axis_alignment(all_aps_axis, P, P_indices):
+    # all_aps_axis shape: (n_t,P,N)
+    axis_alignment = 1/(P*(P-1)) * jnp.sum(
+        jax.vmap(
+            lambda x, pid: axis_align_nt_sum(x[:,pid[0],:],x[:,pid[1],:]),
+            in_axes=(None, 0))
+            (all_aps_axis, P_indices)
             )
-        else:
-            layout_args.update(dict(
-                xaxis=dict(scaleanchor="y", scaleratio=1), # Lock aspect ratio for 2D
-                yaxis=dict(constrain="domain")
-            ))  # type: ignore
-
-        fig.update_layout(**layout_args)  # type: ignore
-        return fig
+    return axis_alignment
 
 
-@jax.jit
+def get_center_axis_alignment(aps_centers, aps_axes, P, P_indices):
+    center_axis_alignment = 1/(P*(P-1)) * jnp.sum(
+        jax.vmap(
+            lambda x,y, pid: center_axis_align_nt_sum(x[pid[0]],y[:, pid[1], :]),
+            in_axes=(None, None, 0))
+            (aps_centers, aps_axes, P_indices)
+            )
+    return center_axis_alignment
+
+
+def sample_anchor_points(m_data: jax.Array, all_t_ks: jax.Array, all_y_ks: jax.Array, A: jax.Array, H: jax.Array, qp_solver):
+    """
+    inputs:
+        m_data (shape): (P,M,N)
+        all_y_ks (shape): (n_t, P)
+    Return: APs, Gs, primals
+        all_anchor_points (shape): (n_t, P, N)
+        all_Gs (shape): (n_t, P, M, N)
+        all_primals (shape):  (n_t, P, 1)
+    """
+    A = A
+    Q = -1 * all_t_ks
+    H = H
+    n_t = all_t_ks.shape[0]
+    P = m_data.shape[0]
+    M = m_data.shape[1]
+    N = m_data.shape[2]
+    all_G = jax.vmap(lambda x,y: x[:,None, None] * y, in_axes=(0,None))(all_y_ks, m_data).reshape((n_t, -1, N))
+    sols = jax.vmap(lambda a, q, g, h: qp_solver.run(params_obj=(a,q[:,None]), params_eq=None, params_ineq=(g,h)), in_axes=(None, 0, 0, None))(A, Q, all_G, H)
+    primals = sols.params.primal
+    duals = sols.params.dual_ineq
+    all_lambdas = duals.reshape((n_t,P,M))
+    Gs_pm = all_G.reshape((n_t,P,M,N))
+    all_anchor_points = jax.vmap(single_ap, in_axes=(0,0))(all_lambdas, Gs_pm)
+    assert all_anchor_points.shape[0] == n_t, "all aps not matching n_t, axis=0"
+    assert all_anchor_points.shape[1] == P, "aps not matching P shape, axis=1"
+    assert all_anchor_points.shape[2] == N, "aps not matching N shape, axis=2"
+
+    return all_anchor_points, all_G, primals
+
+
+def single_ap(lam, gpm):
+    return jax.vmap(safe_divide, in_axes=(0,0))(jnp.sum((lam.T * gpm.T).T, axis=1), jnp.sum(lam, axis=1)) # vmap over P
+
+
+def sample_single_anchor_point(y_k: jax.Array, t_k: jax.Array, m_data: jax.Array, H, A) -> tuple[jax.Array, jax.Array, jax.Array]:
+    "Single anchor point function, calclulate anchor points for t and y "
+    "return primals, G and anchorpoints"
+    qp = OSQP(tol=1e-4)
+    N = m_data.shape[2]
+    M = m_data.shape[1]
+    P = m_data.shape[0]
+    y_k = jnp.expand_dims(y_k, axis=1)
+    t_k = jnp.expand_dims(t_k, axis=1)
+    q_t = -1 * t_k
+    # G = jnp.concatenate(jax.vmap(lambda a,b: a*b, in_axes=(0,0))(y_k, m_data),axis=0)
+    G = (y_k[:, :, None] * m_data).reshape(-1, N) # (P,1,1) * (P,M,N) -> (P*M,N)
+    sol = qp.run(params_obj=(A, q_t), params_eq=None, params_ineq=(G, H)).params
+    primal = sol.primal
+    z_duals = sol.dual_ineq
+    G_p_x_m = G.reshape(P, M,-1)
+    lambda_p_x_m = z_duals.squeeze().reshape(P, M)
+    ap_top = jnp.sum((lambda_p_x_m.T * G_p_x_m.T).T, axis=1) # resulting shape: PxN
+    ap_bottom = jnp.sum(lambda_p_x_m, axis=1) # resulting shape: P
+    anchor_points = jax.vmap(safe_divide, in_axes=(0,0))(ap_top, ap_bottom) # resulting shape: PxN
+    return (anchor_points, G, primal)
+
+
+def get_ap_centers(anchor_points):
+    """aps shape: (n_t, P, N)"""
+    s_0 = jnp.mean(anchor_points, axis=0) # shapes (n_t,P,N) -> (P,N) # anchor centers
+    G_0 = s_0 @ s_0.T # shape: (PxN) @ (PxN).T = (P,P) # center gramm matrix
+    return s_0, G_0
+
+
+def get_aps_axis_var(anchor_points, centers, all_t_ks):
+    # s_1ks.shape = apshape: (n_t,P,N) x centers:(P,N) // vmapped over P, makes P first index, reshape
+    s_1ks = jax.vmap(lambda x,y: x-y, in_axes=(1,0))(anchor_points, centers).swapaxes(1,0) # swaps to (n_t, P, N)
+    # t_1ks.shape (n_t,P) = s_1ks shape: (n_t,P,N) x all_t_ks.shape: (n_t, N)
+    t_1ks = jax.vmap(lambda x,y: x@y.T, in_axes=(0,0))(s_1ks, all_t_ks)
+    # G_1k.shape (n_t, P, P) = s_1ks shape:(n_t,P,N) {(P,N)x(N,P)}
+    G_1k = jax.vmap(lambda x: x@x.T, in_axes=(0))(s_1ks)
+    return s_1ks, t_1ks, G_1k
+
+
 def axis_align_nt_sum(s_ik, s_jk):
     # s_*ks shape: (n_t, N)
     top = lambda x,y: x@y.T # along N axis
@@ -334,7 +196,7 @@ def axis_align_nt_sum(s_ik, s_jk):
     frac = lambda x,y: top(x,y)/bot(x,y)
     return jnp.mean(jax.vmap(frac, in_axes=(0,0))(s_ik, s_jk))
 
-@jax.jit
+
 def center_axis_align_nt_sum(s_0i, s_kj):
     # s_ks shape: (n_t, N)
     # s_0j shape: (1,N)
@@ -343,7 +205,7 @@ def center_axis_align_nt_sum(s_0i, s_kj):
     frac = lambda x,y: top(x,y)/bot(x,y)
     return jnp.mean(jax.vmap(frac, in_axes=(None, 0))(s_0i, s_kj))
 
-@jax.jit
+
 def safe_divide(numerator, denominator, fill_value=0.0):
     """
     Performs division using jax.lax.div, returning fill_value where denominator is 0.
@@ -367,6 +229,147 @@ def safe_divide(numerator, denominator, fill_value=0.0):
     return jax.lax.select(mask, raw_div, safe_fill)
 
 
+def make_plots(M:int, 
+               anchor_points: jax.Array, 
+               Gs: jax.Array, 
+               all_y_ks: jax.Array, 
+               all_t_ks: jax.Array, 
+               primals: jax.Array, 
+               centers: jax.Array, 
+               ap_axes: jax.Array,
+                plots_path: str| None = None, 
+                n_plots: int=3):
+    # Make 3 cone plots, 3 columns 1 row
+    # Make 1 anchor point plot, APs, centers and axis maybe with points
+    # want logic to handle N= 2 or 3 and TODO: if more than do PCA to embed. 
+    # Ensure directory exists
+    n_t, P, N = anchor_points.shape
+
+    if plots_path:
+        base_dir = os.path.dirname(plots_path)
+        if base_dir and not os.path.exists(base_dir):
+            os.makedirs(base_dir)
+
+        html_filename = f"{plots_path}/manifold_plots.html"
+
+    k = min(n_plots, n_t)
+    n_t_sample_indcs = sample(range(n_t), k)
+    js_str = 'cdn'
+    figs = []
+    for i in n_t_sample_indcs:
+        title_str = f"Geometries for n_t: {i}; y_k: {np.array(all_y_ks[i])}"
+        figs.append(plot_cone_geometry(P, 
+                                Gs[i], 
+                                M, 
+                                all_t_ks[i],
+                                primals[i],
+                                anchor_points[i],
+                                title=title_str))
+        
+    figs.append(make_manifold_plot(anchor_points, centers, ap_axes))
+    if plots_path:
+        for fig in figs:
+            # html plot
+            with open(html_filename, 'w') as f:
+                f.write(fig.to_html(full_html=False, include_plotlyjs=js_str))
+                js_str = False
+            # png plot
+            png_name = f"{plots_path}/manifold_plot_n_t{i}.png"
+            fig.write_image(png_name)
+    return figs
+
+
+def make_manifold_plot(anchor_points: jax.Array, centers: jax.Array, ap_axes: jax.Array):
+    """
+    Plots anchor points, centers, and axes. 
+    self.anchor_points shape: (n_t, P, N)
+    self.ap_axes shape: (n_t, P, N)
+    self.centers shape: (P, N)
+    - n_t: number of anchor points per class
+    - P: number of classes
+    - N: dimension (2 or 3)
+    """
+
+    # 1. Detect Dimension and Classes
+    # Shape is (n_t, P, N)
+    n_t, P, N = anchor_points.shape
+
+    # 2. Trace Factory (Smart Wrapper)
+    def make_scatter(coords, **kwargs):
+        # Ensure coords is at least 2D array (1, dim) or (n_t, dim)
+        if coords.ndim == 1:
+            coords = coords.reshape(1, -1)
+            
+        common_args = dict(x=coords[:, 0], y=coords[:, 1], **kwargs)
+        
+        if N == 3:
+            return go.Scatter3d(z=coords[:, 2], **common_args)
+        else:
+            return go.Scatter(**common_args)
+
+    # 3. Initialize Figure
+    fig = go.Figure()
+    
+    # Color palette to match P classes
+    colors = px.colors.qualitative.Plotly
+    
+    # 4. Loop over classes (Iterating over P, which is dim 1)
+    for i in range(P):
+        color = colors[i % len(colors)]
+        
+        # A. Anchor Points (Cluster)
+        # Slicing: [All points, Class i, All spatial coords] -> (n_t, N)
+        class_points = anchor_points[:, i, :]
+        
+        fig.add_trace(make_scatter(
+            class_points, 
+            mode='markers', 
+            name=f'AP{i+1}',
+            marker=dict(color=color)
+        ))
+        
+        # B. Centers
+        # Assumes self.centers is shape (P, N)
+        fig.add_trace(make_scatter(
+            centers[i], 
+            mode='markers', 
+            name=f'AP{i+1} Center',
+            marker=dict(size=14, color=color, symbol='x')
+        ))
+        
+        # C. Axes
+        fig.add_trace(make_scatter(
+            ap_axes[:,i,:], 
+            mode='markers', 
+            name=f'AP{i+1} Axis',
+            marker=dict(size=14, color=color, opacity=0.5, symbol='circle-open')
+        ))
+
+    # 5. Layout Configuration
+    layout_args = dict(
+        height=400, width=600,
+        title=f"Manifold Anchor Structure ({N}D)",
+        template="plotly_white",
+        margin=dict(l=40, r=40, b=40, t=60),
+    )
+
+    if N == 3:
+        layout_args['scene'] = dict(  # type: ignore
+            aspectmode='cube', # Essential for 3D geometry
+            xaxis=dict(title='x'),
+            yaxis=dict(title='y'),
+            zaxis=dict(title='z'),
+        )
+    else:
+        layout_args.update(dict(
+            xaxis=dict(scaleanchor="y", scaleratio=1), # Lock aspect ratio for 2D
+            yaxis=dict(constrain="domain")
+        ))  # type: ignore
+
+    fig.update_layout(**layout_args)  # type: ignore
+    return fig
+
+
 def plot_cone_geometry(P: int,
                        G_jnp: jnp.ndarray, 
                        M: int, 
@@ -386,13 +389,16 @@ def plot_cone_geometry(P: int,
         t_ks (array-like): Random Probe vector.
         primal_jnp (array-like): Primal vector.
         anchor_points (jax.Array, optional): Matrix of anchor points.
+        title: string for plot title
     """
     # --- 1. Data Preparation ---
     G = np.array(G_jnp)
     t_k = np.array(t_k_jnp).flatten()
     primal = np.array(primal_jnp).flatten()
+    # print(f"{primal=}")
     w = t_k - primal # Moreau Decomposition: t = w + primal
-
+    # print(f"{w=}")
+    # print(f"{primal@w.T=}")
     # Detect Dimension (2 or 3)
     dim = G.shape[-1]
     # Reshape G to (P, M, dim)
@@ -541,6 +547,302 @@ def plot_cone_geometry(P: int,
 
     fig.update_layout(**layout_args) # type: ignore
     return fig
+
+
+def simulated_geometry():
+    """Brute force method for finding capacity, should align with glue/simulated capacity"""
+    pass
+
+
+##### old class version
+
+# class glue_solver():
+#     def __init__(self, glue_key, 
+#                  P_point_clouds: int, 
+#                  m_points: int, 
+#                  n_dim_space: int, 
+#                  n_t: int,
+#                  one_v_rest: bool = True):
+#         """Take the hyperparameters and setup the t and y values"""
+#         self.P = P_point_clouds
+#         self.M = m_points
+#         self.N = n_dim_space
+#         self.n_t = n_t
+#         self.A = jnp.eye(self.N)
+#         self.H = jnp.zeros((self.P*self.M,1))
+#         t_key, y_key, self.main_key = jax.random.split(glue_key, 3)
+#         # set up probes and dichotomies
+#         t_mu = jnp.zeros(self.N)
+#         t_sigma = jnp.eye(self.N)
+
+#         # use glue key to generate t and y keys
+#         self.all_t_ks = jax.random.multivariate_normal(t_key, t_mu, t_sigma, shape=(self.n_t,))
+#         self.all_y_ks = self.get_dichotomies(y_key, one_v_rest)
+#         self.P_indices = jnp.array(list(permutations(range(self.P), r=2)))
+
+#     def get_one_v_rest_ys(self, ys_key) -> jax.Array:
+#         # 1. Initialize an array of -1s
+#         potential_ys = jnp.full((self.n_t, self.P), -1)
+#         # 2. Generate random indices for the single '1' in each row
+#         # Each index will be between 0 and P-1
+#         one_indices = jax.random.randint(ys_key, shape=(self.n_t,), minval=0, maxval=self.P)
+#         # 3. Use scatter update to place the 1s at those indices
+#         row_indices = jnp.arange(self.n_t)
+#         potential_ys = potential_ys.at[row_indices, one_indices].set(1)
+#         return potential_ys
+    
+#     def entropy_dichotomy(self, ys_key) -> jax.Array:
+#         ychoice_k, yperm_k = jax.random.split(ys_key)
+#         labels = jnp.array([1,-1])
+#         potential_ys = jax.random.choice(ychoice_k, 
+#                                         labels, 
+#                                         shape=(self.n_t, self.P), 
+#                                         replace=True, 
+#                                         mode="low")
+#         ys_filler = jnp.concatenate([labels]*self.P)[:self.P]
+#         non_dichotomy_mask = jnp.abs(jnp.sum(potential_ys, axis=1))==self.P
+#         n_fillers = int(jnp.sum(non_dichotomy_mask))
+#         if n_fillers > 0:
+#             repeated_filler = jnp.stack([ys_filler,]*n_fillers, axis=0)
+#             shuffled_filler = jax.random.permutation(yperm_k, repeated_filler, axis=1, independent=True)
+#             potential_ys = potential_ys.at[non_dichotomy_mask,:].set(shuffled_filler)
+#         return potential_ys
+
+#     def get_dichotomies(self, ys_key, one_v_rest: bool)->jax.Array:
+#         """Return the dichotomies for P classes for each n_t
+#             returns a matrix: n_t x P filled with 1/-1 """
+#         potential_ys = self.get_one_v_rest_ys(ys_key) if one_v_rest else self.entropy_dichotomy(ys_key)
+#         assert potential_ys.shape[0] == self.n_t, "n_t shape for potential ys incorrect"
+#         assert potential_ys.shape[1] == self.P, "P shape for potnential ys incorrect"
+#         return potential_ys 
+    
+#     def get_m_data(self, data) -> jax.Array:
+#         """Sample from full data to get M data points
+#         data shape: (P classes, num Points, N features)"""
+#         if type(data) != jax.Array:
+#             data = jnp.array(data)
+#         m_key, self.main_key = jax.random.split(self.main_key)
+#         m_keys = jax.random.split(m_key, self.P)
+#         n_data_points = data.shape[1]
+#         def sample_m(k):
+#             return jax.random.choice(k, n_data_points, shape=(self.M,), replace=False)
+#         m_data_axes = jax.vmap(sample_m)(m_keys)
+#         m_data = jax.vmap(lambda d, indcs: d[indcs,:])(data, m_data_axes)
+#         assert m_data.shape[0] == self.P, "M_data wrong dim 0 size"
+#         assert m_data.shape[1] == self.M, "M_data wrong dim 1 size"
+#         assert m_data.shape[2] == self.N, "M_data wrong dim 2 size"
+#         return m_data
+
+#     def run(self, data):
+#         """runs glue solver: take plots, make G, 
+#         calc anchor point 
+#         -> ap centers, axis -> capacity, dim, radius, etc.
+#         Plot if true, if dimensions are larger than 3, 
+#         embed them using PCA, then plot
+#         inputs: jax array, shape: (P,D,N), where D is the number of datapoints in the data
+#         """
+#         assert data.shape[0] == self.P, "Data has incorrect P classes"
+#         assert data.shape[1] >= self.M, "Data has insufficient M data points"
+#         assert data.shape[2] == self.N, "Data has incorrect N features"
+
+#         m_data = self.get_m_data(data)
+#         anchor_points, Gs, Primals = sample_anchor_points(m_data, self.all_t_ks, self.all_y_ks, self.A, self.H) # (aps, Gs, primals), shapes: ((n_t, P,N),(n_t,P*M,N),(n_t,N,1))
+#         centers, center_gram = get_ap_centers(anchor_points)
+#         s_1ks, t_1ks, G_1k = get_aps_axis_var(anchor_points, centers, self.all_t_ks)
+#         self.anchor_points = anchor_points
+#         self.Gs = Gs
+#         self.Primals = Primals
+#         self.centers = centers
+#         self.center_gram = center_gram
+#         self.ap_axes = s_1ks
+#         self.probe_axes_projs = t_1ks
+#         self.axes_gram = G_1k
+#         geometries = self.manifold_geometries()
+#         self.geometries = geometries
+#         return geometries
+
+#     def get_radius(self, t_1ks, G_1ks, G_0):
+#         def rad_top(t,g_1):
+#             return t.T @ jnp.linalg.pinv(g_1+G_0) @ t
+#         def rad_bot(t,g_1):
+#             return t.T @ jnp.linalg.pinv(g_1 + (g_1 @ jnp.linalg.pinv(G_0) @ g_1)) @ t
+#         radius = jnp.sqrt(jnp.mean(jax.vmap(lambda t,g: rad_top(t,g)/rad_bot(t,g), in_axes=(0,0))(t_1ks, G_1ks)))
+#         return radius
+    
+#     def get_center_alignment(self, axis_centers):
+#         inner_f = lambda ac,pi: (ac[pi[0]].T @ ac[pi[1]])/(jnp.linalg.norm(ac[pi[0]]) * jnp.linalg.norm(ac[pi[1]]))
+#         center_alignment = 1/(self.P * (self.P -1)) * jnp.sum(
+#             jax.vmap(inner_f, 
+#                         in_axes=(None,0))(axis_centers, self.P_indices))
+#         return center_alignment
+    
+#     def get_axis_alignment(self, all_aps_axis):
+#         # all_aps_axis shape: (n_t,P,N)
+#         axis_alignment = 1/(self.P*(self.P-1)) * jnp.sum(
+#             jax.vmap(
+#                 lambda x, pid: axis_align_nt_sum(x[:,pid[0],:],x[:,pid[1],:]),
+#                 in_axes=(None, 0))
+#                 (all_aps_axis, self.P_indices)
+#                 )
+#         return axis_alignment
+
+#     def get_center_axis_alignment(self, aps_centers, aps_axes):
+#         center_axis_alignment = 1/(self.P*(self.P-1)) * jnp.sum(
+#             jax.vmap(
+#                 lambda x,y, pid: center_axis_align_nt_sum(x[pid[0]],y[:, pid[1], :]),
+#                 in_axes=(None, None, 0))
+#                 (aps_centers, aps_axes, self.P_indices)
+#                 )
+#         return center_axis_alignment
+    
+#     def manifold_geometries(self):
+#         capacity = (1/self.P * jnp.mean(jax.vmap(lambda s,t: (s@t.T).T @ jnp.linalg.pinv(s@s.T) @ (s@t.T), in_axes=(0,0))(self.anchor_points, self.all_t_ks)))**(-1)
+#         dimension = (1/self.P * jnp.mean(jax.vmap(lambda t,g: t.T @ jnp.linalg.pinv(g) @ t, in_axes=(0,0))(self.probe_axes_projs, self.axes_gram)))
+#         radius = self.get_radius(self.probe_axes_projs, self.axes_gram, self.center_gram)
+#         center_align = self.get_center_alignment(self.centers)
+#         axis_align = self.get_axis_alignment(self.ap_axes)
+#         center_axis_align = self.get_center_axis_alignment(self.centers, self.ap_axes)
+#         approx_capacity = (1 + radius**(-2))/dimension
+#         return capacity, dimension, radius, center_align, axis_align, center_axis_align, approx_capacity
+
+#     def simulated_capacity(self):
+#         """Brute force method for finding capacity, should align with glue/simulated capacity"""
+
+#         return
+
+#     def individual_geometries(self, *args, **kwargs):
+#         """use chou2025a line 1552 equations for calculating individual class dimensions, indexing into P
+#         Make sure to always align with the P so as to track correct classes"""
+#         pass
+
+#     def make_plots(self, plots_path: str| None = None, n_plots: int=3):
+#         # Make 3 cone plots, 3 columns 1 row
+#         # Make 1 anchor point plot, APs, centers and axis maybe with points
+#         # want logic to handle N= 2 or 3 and TODO: if more than do PCA to embed. 
+#         # Ensure directory exists
+#         if plots_path:
+#             base_dir = os.path.dirname(plots_path)
+#             if base_dir and not os.path.exists(base_dir):
+#                 os.makedirs(base_dir)
+
+#             html_filename = f"{plots_path}/manifold_plots.html"
+
+#         k = min(n_plots, self.n_t)
+#         n_t_sample_indcs = sample(range(self.n_t), k)
+#         js_str = 'cdn'
+#         figs = []
+#         for i in n_t_sample_indcs:
+#             title_str = f"Geometries for n_t: {i}; y_k: {np.array(self.all_y_ks[i])}"
+#             figs.append(plot_cone_geometry(self.P, 
+#                                     self.Gs[i], 
+#                                     self.M, 
+#                                     self.all_t_ks[i],
+#                                     self.Primals[i],
+#                                     self.anchor_points[i],
+#                                     title=title_str))
+            
+#         figs.append(self.make_manifold_plot())
+#         if plots_path:
+#             for fig in figs:
+#                 # html plot
+#                 with open(html_filename, 'w') as f:
+#                     f.write(fig.to_html(full_html=False, include_plotlyjs=js_str))
+#                     js_str = False
+#                 # png plot
+#                 png_name = f"{plots_path}/manifold_plot_n_t{i}.png"
+#                 fig.write_image(png_name)
+#         return figs
+    
+#     def make_manifold_plot(self):
+#         """
+#         Plots anchor points, centers, and axes. 
+#         self.anchor_points shape: (n_t, P, N)
+#         self.ap_axes shape: (n_t, P, N)
+#         self.centers shape: (P, N)
+#         - n_t: number of anchor points per class
+#         - P: number of classes
+#         - N: dimension (2 or 3)
+#         """
+
+#         # 1. Detect Dimension and Classes
+#         # Shape is (n_t, P, N)
+#         n_t, num_classes, dim = self.anchor_points.shape
+
+#         # 2. Trace Factory (Smart Wrapper)
+#         def make_scatter(coords, **kwargs):
+#             # Ensure coords is at least 2D array (1, dim) or (n_t, dim)
+#             if coords.ndim == 1:
+#                 coords = coords.reshape(1, -1)
+                
+#             common_args = dict(x=coords[:, 0], y=coords[:, 1], **kwargs)
+            
+#             if dim == 3:
+#                 return go.Scatter3d(z=coords[:, 2], **common_args)
+#             else:
+#                 return go.Scatter(**common_args)
+
+#         # 3. Initialize Figure
+#         fig = go.Figure()
+        
+#         # Color palette to match P classes
+#         colors = px.colors.qualitative.Plotly
+        
+#         # 4. Loop over classes (Iterating over P, which is dim 1)
+#         for i in range(num_classes):
+#             color = colors[i % len(colors)]
+            
+#             # A. Anchor Points (Cluster)
+#             # Slicing: [All points, Class i, All spatial coords] -> (n_t, N)
+#             class_points = self.anchor_points[:, i, :]
+            
+#             fig.add_trace(make_scatter(
+#                 class_points, 
+#                 mode='markers', 
+#                 name=f'AP{i+1}',
+#                 marker=dict(color=color)
+#             ))
+            
+#             # B. Centers
+#             # Assumes self.centers is shape (P, N)
+#             fig.add_trace(make_scatter(
+#                 self.centers[i], 
+#                 mode='markers', 
+#                 name=f'AP{i+1} Center',
+#                 marker=dict(size=14, color=color, symbol='x')
+#             ))
+            
+#             # C. Axes
+#             fig.add_trace(make_scatter(
+#                 self.ap_axes[:,i,:], 
+#                 mode='markers', 
+#                 name=f'AP{i+1} Axis',
+#                 marker=dict(size=14, color=color, opacity=0.5, symbol='circle-open')
+#             ))
+
+#         # 5. Layout Configuration
+#         layout_args = dict(
+#             height=400, width=600,
+#             title=f"Manifold Anchor Structure ({dim}D)",
+#             template="plotly_white",
+#             margin=dict(l=40, r=40, b=40, t=60),
+#         )
+
+#         if dim == 3:
+#             layout_args['scene'] = dict(  # type: ignore
+#                 aspectmode='cube', # Essential for 3D geometry
+#                 xaxis=dict(title='x'),
+#                 yaxis=dict(title='y'),
+#                 zaxis=dict(title='z'),
+#             )
+#         else:
+#             layout_args.update(dict(
+#                 xaxis=dict(scaleanchor="y", scaleratio=1), # Lock aspect ratio for 2D
+#                 yaxis=dict(constrain="domain")
+#             ))  # type: ignore
+
+#         fig.update_layout(**layout_args)  # type: ignore
+#         return fig
+
 
 
 ############# OlD version ######################
