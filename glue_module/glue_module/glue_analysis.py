@@ -37,6 +37,7 @@ def run_glue_solver(key, data: jax.Array, P:int, M:int, N:int, n_t:int, qp_solve
     plotting_inputs = (M, anchor_points, Gs, all_ys, all_ts, Primals, centers, ap_axes)
     return glue_metrics, plotting_inputs
 
+
 def get_m_data(key, data: jax.Array, P: int, M, N) -> jax.Array:
     """Sample from full data to get M data points
     data shape: (P classes, num Points, N features)"""

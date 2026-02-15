@@ -26,7 +26,7 @@ def generate_glue_ground_truth_data(key, P, N, n_points, R, D, rho_c, rho_a, psi
     k_c, k_b, k_pts = jax.random.split(key, 3)
     
     # Scale factor
-    scale = N**(-0.25)
+    scale = N**(-0.5)
     
     # --- Analytic Mixing Coefficients ---
     # Clip for numerical stability
@@ -58,8 +58,8 @@ def generate_glue_ground_truth_data(key, P, N, n_points, R, D, rho_c, rho_a, psi
     
     # Sample directly in R^D
     raw_b = jax.random.normal(k_pts_b, (P, n_points, D))
-    norms = jnp.linalg.norm(raw_b, axis=2, keepdims=True)
-    b_j = raw_b / (norms + 1e-9)
+    # norms = jnp.linalg.norm(raw_b, axis=2, keepdims=True)
+    b_j = raw_b #/ (norms + 1e-9)
     
     # Matrix Multiplication
     # This is now lightning fast for small D
