@@ -170,9 +170,9 @@ def main():
     # (Name, mean_idx, std_idx)
     metrics_map = [
         ("Capacity", 0, 1),
+        ("Capacity Approx", 6, 7),
         ("Calculated Dimension", 2, 3),
         ("Calculated Radius", 4, 5),
-        ("Capacity Approx", 6, 7),
         ("Center Alignment", 8, 9),
         ("Axis Alignment", 10, 11),
         ("Center-Axis Alignment", 12, 13)
@@ -246,6 +246,7 @@ def main():
 
     fig.suptitle(f"GLUE Sweep Results ({n_reps} reps)", fontsize=16)
     plt.savefig("./figS6.png")
+    print(f"Finshed. Saved Plots.")
 
 if __name__=='__main__':
     main()

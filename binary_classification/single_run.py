@@ -187,20 +187,22 @@ def main():
         os.makedirs(task_dir, exist_ok=True)
         
         analysis_lbls_reshaped = analysis_data_Y.squeeze(-1) # (T*S, R)
-        analysis_lbls_reshaped = analysis_lbls_reshaped.reshape(config.num_tasks, config.analysis_subsamples, config.n_repeats)
+        analysis_lbls_reshaped = analysis_lbls_reshaped.reshape(config.num_tasks, config.analysis_subsamples, config.n_repeats).transpose(2,0,1) # match repres: (R,T,S)
         np.save(os.path.join(task_dir, "binary_labels.npy"), np.array(analysis_lbls_reshaped))
-        set_trace()
+        
+        # set_trace()
         # -------- -------------------------------------------------
         # 3. TRAIN LEARNER
         # ---------------------------------------------------------
+        #
         # Returns rep_history: (L, Repeats, Total_Samples, Hidden)
         rep_history, weight_history = learner.train_task(
             task, test_data_dict, global_history, analysis_subset=analysis_subset
         )
-        
+        # L = logged epochs
         # Reshape Representations to match Spec: (L, Repeats, N_Eval_Tasks, N_Subsamples, Hidden_Dim)
         if rep_history is not None:
-            L, R, Total_S, H = rep_history.shape
+            L, R, SxT_eval, H = rep_history.shape
             T_eval = config.num_tasks
             S = config.analysis_subsamples
             
@@ -268,7 +270,9 @@ def main():
     # Train Multi-Task Learner
     # ---------------------------------------------------------
 
-    # --- 9. CL Metrics ---
+    # ---------------------------------------------------------
+    # CL Metrics
+    # ---------------------------------------------------------
     cl_results = cl_analysis.compute_and_log_cl_metrics(
         global_history, expert_histories, config
     )
