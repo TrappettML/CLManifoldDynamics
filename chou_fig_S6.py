@@ -64,6 +64,7 @@ def generate_glue_ground_truth_data(key, P, N, n_points, R, D, rho_c, rho_a, psi
     # Matrix Multiplication
     # This is now lightning fast for small D
     intrinsic_variation = jnp.matmul(b_j, bases)
+    intrinsic_variation = intrinsic_variation / (jnp.linalg.norm(intrinsic_variation, axis=-1, keepdims=True) + 1e-9)
     
     # 4. Combine
     # centers: (P, N) -> (P, 1, N)
@@ -77,7 +78,7 @@ def generate_glue_ground_truth_data(key, P, N, n_points, R, D, rho_c, rho_a, psi
 def main():
     # --- 1. Setup Parameters ---
     P = 2
-    N = 40
+    N = 50
     M = 100
     n_points = M
     rho_c = 0.0
@@ -317,6 +318,7 @@ def main():
     fig.suptitle(f"GLUE Sweep Results ({n_reps} reps)", fontsize=16)
 
     plt.savefig("./figS6.png")
+    print("Finished. Plots Saved.")
 
 
 if __name__=='__main__':

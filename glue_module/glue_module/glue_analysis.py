@@ -35,6 +35,8 @@ def run_glue_solver(key, data: jax.Array, P:int, M:int, N:int, n_t:int, qp_solve
     approx_capacity = (1 + radius**(-2))/dimension
     glue_metrics = (capacity, dimension, radius, center_align, axis_align, center_axis_align, approx_capacity)
     plotting_inputs = (M, anchor_points, Gs, all_ys, all_ts, Primals, centers, ap_axes)
+    
+    # single_p_metrics = (single_p_dims, single_p_radius)
     return glue_metrics, plotting_inputs
 
 
