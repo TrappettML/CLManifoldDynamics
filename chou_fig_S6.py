@@ -58,8 +58,8 @@ def generate_glue_ground_truth_data(key, P, N, n_points, R, D, rho_c, rho_a, psi
     
     # Sample directly in R^D
     raw_b = jax.random.normal(k_pts_b, (P, n_points, D))
-    # norms = jnp.linalg.norm(raw_b, axis=2, keepdims=True)
-    b_j = raw_b #/ (norms + 1e-9)
+    norms = jnp.linalg.norm(raw_b, axis=2, keepdims=True)
+    b_j = raw_b / (norms + 1e-9)
     
     # Matrix Multiplication
     # This is now lightning fast for small D
@@ -147,7 +147,7 @@ def main():
         def run_single_solve(k, d):
             metrics, _ = run_glue_solver(k, d, P, M, N, n_t, qp)
             # Extract metrics: [Capacity, Theory_D, Theory_R, CapApprox]
-            return jnp.stack([metrics[0], metrics[1], metrics[2], metrics[3]])
+            return jnp.stack([metrics[0], metrics[1], metrics[2], metrics[-1]])
 
         # Define the scanning function (over Radii)
         def scan_body(carry, x):

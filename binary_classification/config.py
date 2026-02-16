@@ -1,7 +1,7 @@
 import ml_collections
 import os
 
-def get_config(dataset_name, algorithm):
+def get_config(dataset_name, algorithm) -> ml_collections.ConfigDict:
     config = ml_collections.ConfigDict()
 
     # Algorithm & Dataset
