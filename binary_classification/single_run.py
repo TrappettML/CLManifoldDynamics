@@ -264,6 +264,10 @@ def main():
     learner.clear_test_cache()
     
 
+    # ---------------------------------------------------------
+    # Train Multi-Task Learner
+    # ---------------------------------------------------------
+
     # --- 9. CL Metrics ---
     cl_results = cl_analysis.compute_and_log_cl_metrics(
         global_history, expert_histories, config

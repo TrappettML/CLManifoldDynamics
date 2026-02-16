@@ -115,3 +115,13 @@ def train_single_expert(config, train_task, test_data):
     print(f"  Expert Final: Acc={acc_mean:.4f}±{acc_std:.4f}, Loss={loss_mean:.4f}±{loss_std:.4f}")
     
     return loss_mean, loss_std, acc_mean, acc_std, te_l, te_a
+
+
+def train_multi_task_learner(config, all_data):
+    """
+    Take the entire data set to shuffle all data for a multi-task learning set up
+    If we have two tasks, then 2 class for each binary classification, 3 task=3 classes. 
+    We want to capture hidden representations in the same way as our CL method and expert. 
+    """
+
+    return 
