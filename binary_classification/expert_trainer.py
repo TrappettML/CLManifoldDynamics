@@ -1,3 +1,4 @@
+from copy import deepcopy
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -199,7 +200,7 @@ def train_multitask(config, task_class_pairs, X_global, Y_global, test_data_dict
     # 3. Configure Training
     # Scale epochs so MTL gets roughly same total updates as CL (optional, but fair)
     # We modify the config strictly for this learner instance
-    mtl_config = config
+    mtl_config = deepcopy(config)
     mtl_config.epochs_per_task = config.epochs_per_task * config.num_tasks
     
     # 4. Initialize & Train
@@ -232,8 +233,7 @@ def train_multitask(config, task_class_pairs, X_global, Y_global, test_data_dict
     if reps is not None:
         np.save(os.path.join(save_dir, "representations.npy"), reps)
     
-    # We don't necessarily need the massive weight history for MTL, but you can save if needed
-    # np.save(os.path.join(save_dir, "weights.npy"), weights)
+    np.save(os.path.join(save_dir, "weights.npy"), weights)
     
     with open(os.path.join(save_dir, "metrics.pkl"), 'wb') as f:
         pickle.dump(mtl_history, f)

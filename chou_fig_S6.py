@@ -13,59 +13,134 @@ from functools import partial
 
 print(f"Using {jax.devices()}")
 
-@partial(jax.jit, static_argnames=('P', 'N', 'n_points', 'D')) 
+import jax
+import jax.numpy as jnp
+from jax import jit
+from functools import partial
+
+# ----------------------------------------------------------------------
+# Helper functions (converted to JAX)
+# ----------------------------------------------------------------------
+def get_input_means_jax(key, N, target_dot_product_matrix):
+    """
+    JAX version of get_input_means.
+    Generates P unit vectors in N-dim space with specified pairwise dot products.
+    """
+    P = target_dot_product_matrix.shape[0]
+    # 1. Factorize the target matrix
+    try:
+        L = jnp.linalg.cholesky(target_dot_product_matrix)
+    except:
+        # fallback to eigendecomposition
+        evals, evecs = jnp.linalg.eigh(target_dot_product_matrix)
+        evals = jnp.maximum(evals, 0.0)
+        L = evecs @ jnp.diag(jnp.sqrt(evals))
+    X = L.T  # (P, P)
+
+    # 2. Generate an orthonormal basis in R^N (N x P)
+    key, subkey = jax.random.split(key)
+    E, _ = jnp.linalg.qr(jax.random.normal(subkey, (N, P)))
+
+    # 3. Construct final vectors
+    V = E @ X  # (N, P)
+    return V.T, key  # (P, N)
+
+
+def get_input_subspaces_jax(key, N, D, P, target_sam_matrix):
+    """
+    JAX version of get_input_subspaces.
+    Generates P sets of D orthonormal vectors with specified pairwise alignments.
+    Returns a list of (D, N) arrays.
+    """
+    # Validate dimensions
+    if N < P * D:
+        raise ValueError(f"N must be >= P*D, got N={N}, P*D={P*D}")
+
+    # Construct the Gram matrix from SAM: G_ij = sqrt(target_sam_ij / D)
+    gram_matrix = jnp.sqrt(target_sam_matrix / D)
+
+    # Factorize the Gram matrix
+    evals, evecs = jnp.linalg.eigh(gram_matrix)
+    evals = jnp.maximum(evals, 0.0)
+    sqrt_lambda = jnp.diag(jnp.sqrt(evals))
+    C = evecs @ sqrt_lambda  # (P, P) mixing matrix
+
+    # Generate a pool of P*D orthonormal vectors in R^N
+    key, subkey = jax.random.split(key)
+    master_pool, _ = jnp.linalg.qr(jax.random.normal(subkey, (N, P * D)))
+
+    generated_sets = []
+    for i in range(P):
+        U_i = jnp.zeros((N, D))
+        for k in range(P):
+            V_k = master_pool[:, k*D:(k+1)*D]          # (N, D)
+            U_i += C[i, k] * V_k
+        generated_sets.append(U_i.T)  # (D, N)
+
+    return generated_sets, key
+
+
+# ----------------------------------------------------------------------
+# Updated ground truth data generator
+# ----------------------------------------------------------------------
+@partial(jax.jit, static_argnames=('P', 'N', 'n_points', 'D'))
 def generate_glue_ground_truth_data(key, P, N, n_points, R, D, rho_c, rho_a, psi):
     """
-    Optimized generation of P point clouds with dynamic manifold dimension D.
+    Generate P point clouds of N-dimensional points with controlled geometry.
+    - Centers are unit vectors with pairwise dot product rho_c.
+    - Axes are orthonormal bases with subspace alignment determined by rho_a.
+    - Point generation follows the original GLUE pipeline.
     """
-    k_c, k_b, k_pts = jax.random.split(key, 3)
-    scale = N**(-0.5)
-    
-    # Analytic Mixing Coefficients
-    c_unique_c = jnp.sqrt(jnp.maximum(1.0 - rho_c**2, 1e-10))
-    c_common_c = rho_c
-    
-    c_unique_a = jnp.sqrt(jnp.maximum(1.0 - rho_a**2, 1e-10))
-    c_common_a = rho_a
+    # --- Construct target correlation matrices ---
+    # Centers: compound symmetric with correlation rho_c
+    # Ensure the matrix is positive semi-definite: rho_c ∈ [0,1] is safe.
+    target_center_dot = (1.0 - rho_c) * jnp.eye(P) + rho_c * jnp.ones((P, P))
 
-    # Generate Correlated Centers (u_0)
-    k_c_u, k_c_s = jax.random.split(k_c)
-    U_c_unique = jax.random.normal(k_c_u, (P, N)) * scale
-    U_c_shared = jax.random.normal(k_c_s, (1, N)) * scale
-    
-    centers = c_unique_c * U_c_unique + c_common_c * U_c_shared
+    # Axes: target SAM matrix.
+    # For orthonormal axes, SAM_ii = D (by definition).
+    # SAM_ij = D^2 * rho_a^2  (if each pair of axes had correlation rho_a)
+    # Clamp to D to keep matrix PSD (rho_a must be ≤ 1/sqrt(D)).
+    sam_offdiag = jnp.minimum(D**2 * rho_a**2, D)
+    target_sam = jnp.eye(P) * D + (1.0 - jnp.eye(P)) * sam_offdiag
 
-    # Bases
-    k_b_u, k_b_s = jax.random.split(k_b)
-    U_b_unique = jax.random.normal(k_b_u, (D, P, N)) * scale
-    U_b_shared = jax.random.normal(k_b_s, (D, 1, N)) * scale
-    
-    bases = c_unique_a * U_b_unique + c_common_a * U_b_shared
-    bases = jnp.swapaxes(bases, 0, 1) # (P, D, N)
+    # --- Generate centers ---
+    key, subkey = jax.random.split(key)
+    centers, key = get_input_means_jax(subkey, N, target_center_dot)   # (P, N)
 
-    # Noise and intrinsic variation
-    k_pts_a, k_pts_b = jax.random.split(k_pts)
-    a_j = jax.random.normal(k_pts_a, (P, n_points, 1)) * psi
-    
-    raw_b = jax.random.normal(k_pts_b, (P, n_points, D))
+    # --- Generate axes (orthonormal bases) ---
+    key, subkey = jax.random.split(key)
+    axes_list, key = get_input_subspaces_jax(subkey, N, D, P, target_sam)
+    bases = jnp.stack(axes_list, axis=0)  # (P, D, N)
+
+    # --- Generate points (same as original) ---
+    scale = N ** (-0.5)
+
+    # Random longitudinal modulation (a_j)
+    key, subkey = jax.random.split(key)
+    a_j = jax.random.normal(subkey, (P, n_points, 1)) * psi   # (P, n_points, 1)
+
+    # Random directions in the D-dimensional latent space (b_j), normalized
+    key, subkey = jax.random.split(key)
+    raw_b = jax.random.normal(subkey, (P, n_points, D))
     norms = jnp.linalg.norm(raw_b, axis=2, keepdims=True)
     b_j = raw_b / (norms + 1e-9)
-    
-    intrinsic_variation = jnp.matmul(b_j, bases)
+
+    # Intrinsic variation = b_j @ bases, then normalized
+    intrinsic_variation = jnp.matmul(b_j, bases)               # (P, n_points, N)
     iv_norms = jnp.linalg.norm(intrinsic_variation, axis=2, keepdims=True)
     intrinsic_variation = intrinsic_variation / (iv_norms + 1e-9)
-    
+
     # Combine
-    longitudinal_part = (1 + a_j) * centers[:, None, :]
+    longitudinal_part = (1 + a_j) * centers[:, None, :]        # (P, n_points, N)
     points = longitudinal_part + (R * intrinsic_variation)
-    
+
     return points, centers
 
 def main():
     # --- Parameters ---
     P = 2
     N = 40
-    M = 100
+    M = 50
     n_points = M
     rho_c = 0.0
     rho_a = 0.0
