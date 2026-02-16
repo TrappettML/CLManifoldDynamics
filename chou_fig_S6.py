@@ -122,13 +122,14 @@ def generate_glue_ground_truth_data(key, P, N, n_points, R, D, rho_c, rho_a, psi
     # Random directions in the D-dimensional latent space (b_j), normalized
     key, subkey = jax.random.split(key)
     raw_b = jax.random.normal(subkey, (P, n_points, D))
-    norms = jnp.linalg.norm(raw_b, axis=2, keepdims=True)
-    b_j = raw_b / (norms + 1e-9)
+    # norms = jnp.linalg.norm(raw_b, axis=2, keepdims=True)
+    # b_j = raw_b / (norms + 1e-9)
 
     # Intrinsic variation = b_j @ bases, then normalized
-    intrinsic_variation = jnp.matmul(b_j, bases)               # (P, n_points, N)
-    iv_norms = jnp.linalg.norm(intrinsic_variation, axis=2, keepdims=True)
-    intrinsic_variation = intrinsic_variation / (iv_norms + 1e-9)
+    intrinsic_variation = jnp.matmul(raw_b, bases)
+    # intrinsic_variation = jnp.matmul(b_j, bases)               # (P, n_points, N)
+    # iv_norms = jnp.linalg.norm(intrinsic_variation, axis=2, keepdims=True)
+    # intrinsic_variation = intrinsic_variation / (iv_norms + 1e-9)
 
     # Combine
     longitudinal_part = (1 + a_j) * centers[:, None, :]        # (P, n_points, N)
@@ -139,8 +140,8 @@ def generate_glue_ground_truth_data(key, P, N, n_points, R, D, rho_c, rho_a, psi
 def main():
     # --- Parameters ---
     P = 2
-    N = 40
-    M = 50
+    N = 50
+    M = 100
     n_points = M
     rho_c = 0.0
     rho_a = 0.0

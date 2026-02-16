@@ -13,7 +13,7 @@ from ipdb import set_trace
 import data_utils
 import config as config_module
 from learner import ContinualLearner
-from expert_trainer import train_single_expert
+from expert_trainer import train_single_expert, run_random_baseline, train_multitask
 from models import CLHook
 import plastic_analysis
 import cl_analysis
@@ -190,7 +190,9 @@ def main():
         analysis_lbls_reshaped = analysis_lbls_reshaped.reshape(config.num_tasks, config.analysis_subsamples, config.n_repeats).transpose(2,0,1) # match repres: (R,T,S)
         np.save(os.path.join(task_dir, "binary_labels.npy"), np.array(analysis_lbls_reshaped))
         
-        # set_trace()
+        # Get Random Performance
+        run_random_baseline(config, test_data_dict, analysis_subset)
+
         # -------- -------------------------------------------------
         # 3. TRAIN LEARNER
         # ---------------------------------------------------------
@@ -269,7 +271,15 @@ def main():
     # ---------------------------------------------------------
     # Train Multi-Task Learner
     # ---------------------------------------------------------
-
+    # Uses the global training data and the analysis subset created earlier
+    train_multitask(
+        config, 
+        task_class_pairs, 
+        X_train_global, 
+        Y_train_global, 
+        test_data_dict, 
+        analysis_subset
+    )
     # ---------------------------------------------------------
     # CL Metrics
     # ---------------------------------------------------------
