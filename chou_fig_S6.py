@@ -134,13 +134,17 @@ def generate_glue_ground_truth_data(key, P, N, n_points, R, D, rho_c, rho_a, psi
     # Combine
     longitudinal_part = (1 + a_j) * centers[:, None, :]        # (P, n_points, N)
     points = longitudinal_part + (R * intrinsic_variation)
+    noise_scale = 1e-2  # as in the paper
+    key, subkey = jax.random.split(key)
+    noise = jax.random.normal(subkey, points.shape) * noise_scale
+    points = points + noise
 
     return points, centers
 
 def main():
     # --- Parameters ---
     P = 2
-    N = 50
+    N = 100
     M = 100
     n_points = M
     rho_c = 0.0
