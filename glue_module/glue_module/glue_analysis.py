@@ -28,16 +28,17 @@ def run_glue_solver(key, data: jax.Array, P:int, M:int, N:int, n_t:int, qp_solve
     # manifold geometries
     capacity = (1/P * jnp.mean(jax.vmap(lambda s,t: (s@t.T).T @ jnp.linalg.pinv(s@s.T) @ (s@t.T), in_axes=(0,0))(anchor_points, all_ts)))**(-1)
     dimension = (1/P * jnp.mean(jax.vmap(lambda t,g: t.T @ jnp.linalg.pinv(g) @ t, in_axes=(0,0))(t_1ks, axes_gram)))
+    indiv_dim = jnp.mean(jax.vmap(lambda t,g: t * (jnp.linalg.pinv(g)@t), in_axes=(0,0))(t_1ks, axes_gram), axis=0)
     radius = get_radius(t_1ks, axes_gram, center_gram)
+    indiv_rad = get_indiv_radius(t_1ks, axes_gram, center_gram)
     center_align = get_center_alignment(centers, P, P_indices)
     axis_align = get_axis_alignment(ap_axes, P, P_indices)
     center_axis_align = get_center_axis_alignment(centers, ap_axes, P, P_indices)
     approx_capacity = (1 + radius**(-2))/dimension
     glue_metrics = (capacity, dimension, radius, center_align, axis_align, center_axis_align, approx_capacity)
     plotting_inputs = (M, anchor_points, Gs, all_ys, all_ts, Primals, centers, ap_axes)
-    
-    # single_p_metrics = (single_p_dims, single_p_radius)
-    return glue_metrics, plotting_inputs
+    single_p_metrics = (indiv_dim, indiv_rad)
+    return glue_metrics, plotting_inputs, single_p_metrics
 
 
 def get_m_data(key, data: jax.Array, P: int, M, N) -> jax.Array:
@@ -71,7 +72,6 @@ def get_all_ys(key, P:int, n_t: int):
     potential_ys = potential_ys.at[row_indices, one_indices].set(1)
     return potential_ys
 
-
 def get_radius(t_1ks, G_1ks, G_0):
     def rad_top(t,g_1):
         return t.T @ jnp.linalg.pinv(g_1+G_0) @ t
@@ -82,6 +82,21 @@ def get_radius(t_1ks, G_1ks, G_0):
     bot_values = jax.vmap(rad_bot)(t_1ks, G_1ks)
     mean_top = jnp.mean(top_values)
     mean_bot = jnp.mean(bot_values)
+    radius = jnp.sqrt(mean_top/mean_bot)
+    # for neural networks representations
+    # radius = jnp.sqrt(jnp.mean(jax.vmap(lambda t,g: rad_top(t,g)/rad_bot(t,g), in_axes=(0,0))(t_1ks, G_1ks)))
+    return radius
+
+def get_indiv_radius(t_1ks, G_1ks, G_0):
+    def rad_top(t,g_1):
+        return t.T * jnp.linalg.pinv(g_1+G_0) @ t
+    def rad_bot(t,g_1):
+        return t.T * jnp.linalg.pinv(g_1 + (g_1 @ jnp.linalg.pinv(G_0) @ g_1)) @ t
+    # for neural data chou2025a
+    top_values = jax.vmap(rad_top)(t_1ks, G_1ks)
+    bot_values = jax.vmap(rad_bot)(t_1ks, G_1ks)
+    mean_top = jnp.mean(top_values, axis=0)
+    mean_bot = jnp.mean(bot_values, axis=0)
     radius = jnp.sqrt(mean_top/mean_bot)
     # for neural networks representations
     # radius = jnp.sqrt(jnp.mean(jax.vmap(lambda t,g: rad_top(t,g)/rad_bot(t,g), in_axes=(0,0))(t_1ks, G_1ks)))

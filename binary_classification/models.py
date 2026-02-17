@@ -38,6 +38,38 @@ class TwoLayerMLP(nn.Module):
         x = self.layer1(x)
         x = nn.relu(x)
         return x
+    
+
+class CNN(nn.Module):
+    """A simple CNN model."""
+    hidden_dim: int
+    output_dim: int = 1
+
+    def setup(self):
+        self.layer1 = nn.Dense(features=self.hidden_dim, use_bias=False)
+        self.layer2 = nn.Dense(features=self.output_dim, use_bias=False)
+
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Conv(features=32, kernel_size=(3, 3))(x)
+        x = nn.relu(x)
+        x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2))
+        x = nn.Conv(features=64, kernel_size=(3, 3))(x)
+        x = nn.relu(x)
+        x = nn.avg_pool(x, window_shape=(2, 2), strides=(2, 2))
+        x = x.reshape((x.shape[0], -1))  # flatten
+        x = self.layer1(x)
+        x = nn.relu(x)
+        x = self.layer2(x)
+        return x
+    
+    def get_features(self, x: jax.Array) -> jax.Array:
+        """
+        Returns the hidden representation (post-ReLU).
+        """
+        x = self.layer1(x)
+        x = nn.relu(x)
+        return x
 
 class CLHook:
     """

@@ -15,9 +15,8 @@ import config as config_module
 from learner import ContinualLearner
 from expert_trainer import train_single_expert, run_random_baseline, train_multitask
 from models import CLHook
-import plastic_analysis
 import cl_analysis
-import glue_module.glue_module.glue_analysis as glue_analysis
+
 
 
 class LoggerHook(CLHook):
@@ -407,25 +406,10 @@ def main():
     plt.savefig(plot_path, dpi=150)
     print(f"Performance plot saved to {plot_path}")
     plt.close()
-
-    # --- 12. Analysis Pipelines ---
-    if False:
-        print(f"\n{'='*60}")
-        print(f"Running Analysis Pipelines")
-        print(f"{'='*60}\n")
-        
-        plastic_analysis.run_analysis_pipeline(config)
-        
-        manifold_results = glue_analysis.analyze_manifold_trajectory(config, task_names)
-        if manifold_results:
-            manifold_path = os.path.join(config.results_dir, "manifold_metrics.pkl")
-            with open(manifold_path, 'wb') as f:
-                pickle.dump(manifold_results, f)
-            print(f"Manifold metrics saved to {manifold_path}")
-        
-        print(f"\n{'='*60}")
-        print(f"Experiment Complete!")
-        print(f"{'='*60}\n")
+    
+    print(f"\n{'='*60}")
+    print(f"Experiment Complete!")
+    print(f"{'='*60}\n")
 
 
 if __name__ == "__main__":

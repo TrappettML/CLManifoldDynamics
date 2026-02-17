@@ -61,7 +61,7 @@ def run_glue_analysis(x_reshaped, key, qp):
     M = x_reshaped.shape[1]
     N = x_reshaped.shape[2]
     n_t = 200 # chou2025a uses n_t = 200
-    geometries, _ = run_glue_solver(new_key, x_reshaped, P, M, N, n_t, qp)
+    geometries, _, _ = run_glue_solver(new_key, x_reshaped, P, M, N, n_t, qp)
     return geometries, next_key
 
 

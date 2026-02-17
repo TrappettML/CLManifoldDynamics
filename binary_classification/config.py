@@ -47,8 +47,8 @@ def get_config(dataset_name, algorithm) -> ml_collections.ConfigDict:
     config.min_delta = 1e-4
     
     # Analysis Parameters
-    config.analysis_subsamples = 100
-    config.n_t = 20
+    config.analysis_subsamples = 200
+    config.n_t = 100
     config.metric_type = 'acc'
     config.m_integrator = 'final'
 
