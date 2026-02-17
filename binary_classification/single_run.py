@@ -297,7 +297,9 @@ def main():
         pickle.dump(global_history, f)
     print(f"Global history saved to {history_save_path}")
 
-    # --- 10. Plotting ---
+    # ---------------------------------------------------------
+    # Plotting
+    # ---------------------------------------------------------
     print(f"\n{'='*60}")
     print(f"Generating Plots")
     print(f"{'='*60}\n")

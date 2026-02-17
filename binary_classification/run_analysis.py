@@ -264,7 +264,6 @@ def _plot_glue_results(full_results, metric_names, config):
     print(f"GLUE plots saved to {save_path}")
 
 
-
 def run_mtl_plasticity_analysis(config):
     print("\n--- Running MTL Plasticity Analysis ---")
     mtl_dir = os.path.join(config.results_dir, "multitask")
@@ -358,8 +357,96 @@ def _plot_mtl_metrics(data_dict, config, title_prefix, filename):
     print(f"  Saved plot to {filename}")
 
 
+def run_mtl_glue_analysis(config):
+    print("\n--- Starting MTL GLUE Metric Analysis ---")
+    mtl_dir = os.path.join(config.results_dir, "multitask")
+    
+    # 1. Setup
+    metric_names = [
+        'Capacity', 'Dimension', 'Radius', 
+        'Center Alignment', 'Axis Alignment', 'Center-Axis Alignment', 
+        'Approx Capacity'
+    ]
+    
+    # Constants
+    P = 2 
+    M = config.analysis_subsamples
+    N = config.hidden_dim
+    n_t = config.n_t
+    
+    # Initialize Solver
+    qp = OSQP(tol=1e-4)
+    vmapped_glue = jax.vmap(
+        partial(run_glue_solver, P=P, M=M, N=N, n_t=n_t, qp_solver=qp),
+        in_axes=(0, 0)
+    )
+    
+    # 2. Load Data
+    # Shape: (L, R, T, S, H)
+    reps_path = os.path.join(mtl_dir, "representations.npy")
+    # Shape: (R, T, S) -- Note: Transposed in train_multitask before saving
+    lbls_path = os.path.join(mtl_dir, "binary_labels.npy")
+    
+    if not os.path.exists(reps_path) or not os.path.exists(lbls_path):
+        print("Skipping MTL GLUE (Files not found)")
+        return
 
-def run_full_experiment_analysis(config):
+    reps_data = np.load(reps_path)
+    lbls_data = np.load(lbls_path)
+    
+    L, R, T, S, H = reps_data.shape
+    
+    # Storage: results[task_name][metric] -> (Steps, Repeats)
+    full_results = {}
+    master_key = jax.random.PRNGKey(config.seed)
+
+    # 3. Iterate over Tasks and Time
+    for t_idx in range(T):
+        task_name = f"task_{t_idx:03d}"
+        print(f"Processing MTL GLUE for {task_name}...")
+        
+        full_results[task_name] = {m: [] for m in metric_names}
+        
+        # Labels for this task: (R, S)
+        current_eval_lbls = lbls_data[:, t_idx, :]
+        
+        for step in range(L):
+            # Reps: (R, S, H)
+            current_reps = reps_data[step, :, t_idx, :, :]
+            
+            # Format: (R, P, M, H)
+            formatted_data = _prep_glue_batch(current_reps, current_eval_lbls, P, M, H)
+            
+            # Keys
+            step_key = jax.random.fold_in(master_key, t_idx * 10000 + step)
+            batch_keys = jax.random.split(step_key, R)
+            
+            # Run Solver
+            metrics_tuple, _, _ = vmapped_glue(batch_keys, formatted_data)
+            
+            for i, name in enumerate(metric_names):
+                full_results[task_name][name].append(np.array(metrics_tuple[i]))
+
+        # Stack results: (Steps, Repeats)
+        for name in metric_names:
+            full_results[task_name][name] = np.stack(full_results[task_name][name])
+
+        # Plot specific task metrics
+        _plot_mtl_metrics(
+            full_results[task_name], 
+            config, 
+            f"MTL GLUE - {task_name}", 
+            f"mtl_glue_{task_name}.png"
+        )
+
+    # 4. Save
+    save_path = os.path.join(mtl_dir, "glue_metrics.pkl")
+    with open(save_path, 'wb') as f:
+        pickle.dump(full_results, f)
+    print(f"MTL GLUE metrics saved to {save_path}")
+
+
+def run_all_representation_analysis(experiment_path):
     """
     Orchestrates the complete analysis suite for an experiment.
     
@@ -370,30 +457,38 @@ def run_full_experiment_analysis(config):
     
     Args:
         config: The experiment configuration object.
+        experiment_path: Path to the specific experiment results directory.
     """
+    # Override config paths to point to the specific experiment folder
+    config.results_dir = experiment_path
+    config.reps_dir = experiment_path 
+    config.figures_dir = os.path.join(experiment_path, "figures")
+    os.makedirs(config.figures_dir, exist_ok=True)
+
     print(f"\n{'='*60}")
     print(f"STARTING FULL EXPERIMENT ANALYSIS: {config.dataset_name} / {config.algorithm}")
+    print(f"Target Path: {experiment_path}")
     print(f"{'='*60}")
 
     # --- 1. Execute Individual Analysis Pipelines ---
     
     # A. Plasticity Metrics (CL)
-    # Generates: results/{dataset}/{algo}/plastic_analysis_{dataset}.pkl
+    # Generates: {experiment_path}/plastic_analysis_{dataset}.pkl
     try:
         run_plastic_analysis_pipeline(config)
     except Exception as e:
         print(f"Error in Plasticity Pipeline: {e}")
 
     # B. GLUE Metrics (CL)
-    # Generates: results/{dataset}/{algo}/glue_metrics.pkl
+    # Generates: {experiment_path}/glue_metrics.pkl
     try:
         run_glue_analysis_pipeline(config)
     except Exception as e:
         print(f"Error in GLUE Pipeline: {e}")
 
     # C. Multi-Task Learning Analysis (Upper Bound)
-    # Generates: results/{dataset}/{algo}/multitask/plasticity_metrics.pkl
-    # Generates: results/{dataset}/{algo}/multitask/glue_metrics.pkl
+    # Generates: {experiment_path}/multitask/plasticity_metrics.pkl
+    # Generates: {experiment_path}/multitask/glue_metrics.pkl
     if os.path.exists(os.path.join(config.results_dir, "multitask")):
         try:
             run_mtl_plasticity_analysis(config)
@@ -489,4 +584,4 @@ def run_full_experiment_analysis(config):
 
 
 if __name__=='__main__':
-    run_full_experiment_analysis()
+    run_all_representation_analysis()
