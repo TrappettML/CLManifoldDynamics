@@ -164,78 +164,86 @@ def run_random_baseline(config, test_data_dict, analysis_subset):
 
 def train_multitask(config, task_class_pairs, X_global, Y_global, test_data_dict, analysis_subset):
     """
-    Aggregates ALL task data into one joint dataset and trains a Multi-Task learner.
-    Saves representations and metrics to results/.../multitask/
+    Trains Multi-Task Learner and saves representations/labels in a format
+    compatible with Plasticity and GLUE analysis pipelines.
     """
     print(f"\n{'='*40}\nRunning Multi-Task Learning (Upper Bound)\n{'='*40}")
     
-    # 1. Aggregate Data from ALL Tasks
-    # We use create_single_task_data to ensure EXACT sample/class identity with CL run
+    # 1. Aggregate Data
     all_images = []
     all_labels = []
     
     print("  Aggregating data from all tasks...")
     for t in range(config.num_tasks):
-        # "train" split ensures we get the training data
         t_X, t_Y, _ = data_utils.create_single_task_data(
             t, task_class_pairs, X_global, Y_global, config, split='train'
         )
         all_images.append(t_X)
         all_labels.append(t_Y)
         
-    # Concatenate: (Total_Samples, R, D)
     mtl_X = jnp.concatenate(all_images, axis=0)
     mtl_Y = jnp.concatenate(all_labels, axis=0)
     
-    # 2. Global Shuffle
-    # Essential for MTL: shuffle samples so tasks are mixed in every batch
+    # 2. Shuffle
     rng_mtl = np.random.default_rng(config.seed)
     perm = rng_mtl.permutation(mtl_X.shape[0])
-    
     mtl_X = mtl_X[perm]
     mtl_Y = mtl_Y[perm]
     
-    print(f"  Joint Dataset Shape: {mtl_X.shape}")
-    
-    # 3. Configure Training
-    # Scale epochs so MTL gets roughly same total updates as CL (optional, but fair)
-    # We modify the config strictly for this learner instance
+    # 3. Configure
     mtl_config = deepcopy(config)
     mtl_config.epochs_per_task = config.epochs_per_task * config.num_tasks
     
-    # 4. Initialize & Train
+    # 4. Train
     learner = ContinualLearner(mtl_config)
-    
-    # We wrap the joint data as a single "task" named 'multi_task'
     mtl_task = {'name': 'multi_task_joint', 'data': (mtl_X, mtl_Y)}
     
-    # Placeholder history to capture the training curve
     mtl_history = {
-        'train_acc': [], 
-        'train_loss': [],
+        'train_acc': [], 'train_loss': [],
         'test_metrics': {t: {'acc': [], 'loss': []} for t in test_data_dict}
     }
     
-    # Reuse train_task to get representations over time
-    # This returns (Time, Repeats, Samples, Hidden)
     print(f"  Training for {mtl_config.epochs_per_task} epochs...")
-    reps, weights = learner.train_task(
-        mtl_task, 
-        test_data_dict, 
-        mtl_history, 
-        analysis_subset=analysis_subset
+    # rep_history: (L, R, Total_Samples, H)
+    rep_history, weight_history = learner.train_task(
+        mtl_task, test_data_dict, mtl_history, analysis_subset=analysis_subset
     )
     
-    # 5. Save Results
+    # 5. Save Results (Formatted for Analysis)
     save_dir = os.path.join(config.results_dir, "multitask")
     os.makedirs(save_dir, exist_ok=True)
     
-    if reps is not None:
-        np.save(os.path.join(save_dir, "representations.npy"), reps)
+    # A. Reshape Representations: (L, R, T*S, H) -> (L, R, T, S, H)
+    # This enables per-task GLUE analysis
+    if rep_history is not None:
+        L, R, Total_S, H = rep_history.shape
+        T = config.num_tasks
+        S = config.analysis_subsamples
+        
+        # Ensure exact match before reshaping
+        if Total_S == T * S:
+            reps_reshaped = rep_history.reshape(L, R, T, S, H)
+            np.save(os.path.join(save_dir, "representations.npy"), reps_reshaped)
+            print(f"  Saved representations: {reps_reshaped.shape}")
+        else:
+            print(f"  WARNING: shape mismatch. Expected {T*S} samples, got {Total_S}. Saving raw.")
+            np.save(os.path.join(save_dir, "representations.npy"), rep_history)
+
+    # B. Save Weights
+    np.save(os.path.join(save_dir, "weights.npy"), weight_history)
     
-    np.save(os.path.join(save_dir, "weights.npy"), weights)
-    
+    # C. Save Metrics
     with open(os.path.join(save_dir, "metrics.pkl"), 'wb') as f:
         pickle.dump(mtl_history, f)
+        
+    # D. Save Analysis Labels (Critical for GLUE)
+    # analysis_subset[1] is (Total_Samples, R, 1) -> (T*S, R)
+    # We need (R, T, S) to match the GLUE pipeline expectation
+    if analysis_subset is not None:
+        analysis_Y = analysis_subset[1]
+        lbls_flat = analysis_Y.squeeze(-1) # (T*S, R)
+        # Reshape: (T, S, R) -> Transpose: (R, T, S)
+        lbls_reshaped = lbls_flat.reshape(T, S, R).transpose(2, 0, 1)
+        np.save(os.path.join(save_dir, "binary_labels.npy"), np.array(lbls_reshaped))
         
     print(f"  Multi-Task results saved to {save_dir}")

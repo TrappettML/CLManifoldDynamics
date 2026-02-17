@@ -10,6 +10,7 @@ import plotly.express as px
 import os
 from random import sample
 from functools import partial
+import pickle
 
 @jax.jit(static_argnames=('P', 'M', 'N', 'n_t', 'qp_solver'))
 def run_glue_solver(key, data: jax.Array, P:int, M:int, N:int, n_t:int, qp_solver):
@@ -570,6 +571,114 @@ def plot_cone_geometry(P: int,
 def simulated_geometry():
     """Brute force method for finding capacity, should align with glue/simulated capacity"""
     pass
+
+
+
+def run_glue_analysis_pipeline(glue_metrics, config):
+    """
+    Analyzes, saves, and plots the GLUE metrics returned by run_glue_solver.
+    
+    Args:
+        glue_metrics (dict): Dictionary of metric histories. 
+                             Values should be numpy arrays of shape (Steps, Repeats) or (Steps,).
+                             Example: {'test_accuracy': array(...), 'forgetting': array(...)}
+        config: Configuration object containing 'dataset_name', 'figures_dir', 
+                'log_frequency', 'num_tasks', 'epochs_per_task', etc.
+    """
+    print("--- Starting GLUE Metric Analysis ---")
+    
+    # 1. Setup Directories
+    # We save the raw metric data in the same reps_dir or a results folder
+    save_dir = getattr(config, 'reps_dir', os.path.join("results", config.dataset_name, config.algorithm))
+    os.makedirs(save_dir, exist_ok=True)
+    os.makedirs(config.figures_dir, exist_ok=True)
+    
+    # 2. Archive Raw Metrics
+    save_data_path = os.path.join(save_dir, f"glue_metrics_{config.dataset_name}.pkl")
+    
+    # Calculate task boundaries for saving/plotting
+    # Assuming standard continual learning setup: Total Epochs = Tasks * Epochs_per_Task
+    task_boundaries = []
+    if hasattr(config, 'num_tasks') and hasattr(config, 'epochs_per_task'):
+        cumulative_epochs = 0
+        for _ in range(config.num_tasks):
+            cumulative_epochs += config.epochs_per_task
+            task_boundaries.append(cumulative_epochs)
+    
+    with open(save_data_path, 'wb') as f:
+        pickle.dump({'metrics': glue_metrics, 'task_boundaries': task_boundaries}, f)
+    print(f"GLUE metrics data saved to {save_data_path}")
+
+    # 3. Filter Plottable Metrics
+    # We only plot items that are time-series (lists or numpy arrays)
+    plot_metrics = {}
+    for k, v in glue_metrics.items():
+        if isinstance(v, (list, np.ndarray)):
+            arr = np.array(v)
+            # Ensure it has at least 1 dimension
+            if arr.ndim > 0:
+                plot_metrics[k] = arr
+    
+    if not plot_metrics:
+        print("No plottable time-series metrics found in output.")
+        return
+
+    metric_names = list(plot_metrics.keys())
+    n_metrics = len(metric_names)
+    
+    # 4. Generate Plots
+    fig, axes = plt.subplots(n_metrics, 1, figsize=(10, 3 * n_metrics), sharex=True)
+    if n_metrics == 1: 
+        axes = [axes]
+    
+    # Determine X-axis (Epochs)
+    # Use the length of the first metric to determine total steps
+    first_metric_data = plot_metrics[metric_names[0]]
+    total_steps = first_metric_data.shape[0]
+    
+    # Construct x-axis based on log frequency
+    x_axis = np.arange(1, total_steps + 1) * config.log_frequency
+    
+    print(f"Plotting {n_metrics} metrics over {total_steps} logging steps...")
+
+    for i, metric in enumerate(metric_names):
+        ax = axes[i]
+        data = plot_metrics[metric]
+        
+        # Calculate Mean and Std Dev if multiple repeats exist
+        # Expected shape: (Steps, Repeats)
+        if data.ndim > 1 and data.shape[1] > 1:
+            mean = np.nanmean(data, axis=1)
+            std = np.nanstd(data, axis=1)
+            
+            ax.plot(x_axis, mean, label='Mean', color='purple', linewidth=2)
+            ax.fill_between(x_axis, mean - std, mean + std, color='purple', alpha=0.2)
+        else:
+            # Single run or flattened
+            flat_data = data.flatten() if data.ndim > 1 else data
+            ax.plot(x_axis, flat_data, color='purple', linewidth=2)
+
+        ax.set_ylabel(metric)
+        ax.grid(True, alpha=0.3)
+        
+        # Add Vertical Lines for Task Boundaries
+        # We assume boundaries are in 'Epochs', so they align directly with x_axis
+        for boundary in task_boundaries[:-1]: # Skip the very last boundary (end of training)
+            ax.axvline(x=boundary, color='red', linestyle='--', alpha=0.6)
+
+        if i == 0:
+            ax.set_title(f"GLUE Metrics ({config.dataset_name}) - {config.algorithm}")
+            if data.ndim > 1 and data.shape[1] > 1:
+                ax.legend(loc='upper right')
+
+    axes[-1].set_xlabel('Epochs')
+    plt.tight_layout()
+    
+    # 5. Save Plot
+    save_plot_path = os.path.join(config.figures_dir, f"glue_metrics_{config.dataset_name}.png")
+    plt.savefig(save_plot_path, dpi=150)
+    plt.close()
+    print(f"GLUE metric plots saved to {save_plot_path}")
 
 
 ##### old class version

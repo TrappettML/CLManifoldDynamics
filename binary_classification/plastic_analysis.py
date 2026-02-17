@@ -75,10 +75,11 @@ def _compute_weight_metrics_batch(current, ref_task, ref_init):
     keys = ['Weight Magnitude', 'Weight Difference (Task)', 'Weight Difference (Init)']
     return {k: v for k, v in zip(keys, results)}
 
+
 # --- Main Analysis Pipeline ---
 
-def run_analysis_pipeline(config):
-    print("--- Starting Plasticine Metric Analysis (JAX Optimized) ---")
+def run_plastic_analysis_pipeline(config):
+    print("--- Starting Plasticine Metric Analysis ---")
     
     tasks = data_utils.create_continual_tasks(config, split='train')
     task_names = [t.name for t in tasks]
@@ -194,3 +195,6 @@ def run_analysis_pipeline(config):
     save_path = os.path.join(config.figures_dir, f"plasticine_metrics_{config.dataset_name}.png")
     plt.savefig(save_path)
     print(f"Analysis plots saved to {save_path}")
+
+
+
