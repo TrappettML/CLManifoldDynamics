@@ -1,18 +1,16 @@
 import os
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".70" 
+
 import numpy as np
 import matplotlib.pyplot as plt
-import jax
-import jax.numpy as jnp
-from jaxopt import OSQP
-import pickle
-from functools import partial
-import data_utils
+
+import argparse
+from tqdm import tqdm
 import os
 import pickle
 import jax
 import jax.numpy as jnp
-import numpy as np
-import matplotlib.pyplot as plt
+
 from functools import partial
 from jaxopt import OSQP
 from glue_module.glue_analysis import run_glue_solver
@@ -128,7 +126,7 @@ def run_glue_analysis_pipeline(config):
             current_eval_lbls = lbls_data[:, eval_task_idx, :]
             
             # Iterate Time Steps
-            for step in range(L):
+            for step in tqdm(range(L)):
                 # Shape: (R, S, H)
                 current_reps = reps_data[step, :, eval_task_idx, :, :]
                 
@@ -446,7 +444,7 @@ def run_mtl_glue_analysis(config):
     print(f"MTL GLUE metrics saved to {save_path}")
 
 
-def run_all_representation_analysis(experiment_path):
+def run_all_representation_analysis():
     """
     Orchestrates the complete analysis suite for an experiment.
     
@@ -459,7 +457,21 @@ def run_all_representation_analysis(experiment_path):
         config: The experiment configuration object.
         experiment_path: Path to the specific experiment results directory.
     """
+    """
+    Orchestrates the complete analysis suite for an experiment.
+    Loads config from the experiment directory.
+    """
+    experiment_path = "/home/users/MTrappett/manifold/binary_classification/results/mnist/RL/"
+    # --- 1. Load Configuration ---
+    config_path = os.path.join(experiment_path, "config.pkl")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found at {config_path}")
+        
+    with open(config_path, 'rb') as f:
+        config = pickle.load(f)
+
     # Override config paths to point to the specific experiment folder
+    # (Crucial if folder was moved or renamed since training)
     config.results_dir = experiment_path
     config.reps_dir = experiment_path 
     config.figures_dir = os.path.join(experiment_path, "figures")

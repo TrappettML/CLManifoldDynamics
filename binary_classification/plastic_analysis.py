@@ -75,17 +75,22 @@ def _compute_weight_metrics_batch(current, ref_task, ref_init):
     keys = ['Weight Magnitude', 'Weight Difference (Task)', 'Weight Difference (Init)']
     return {k: v for k, v in zip(keys, results)}
 
-
 # --- Main Analysis Pipeline ---
 
 def run_plastic_analysis_pipeline(config):
     print("--- Starting Plasticine Metric Analysis ---")
     
-    tasks = data_utils.create_continual_tasks(config, split='train')
-    task_names = [t.name for t in tasks]
+    # 1. Setup paths and init weights
+    # Note: config.results_dir is usually where the task folders are located
+    base_dir = config.results_dir 
     
-    init_weights_path = os.path.join(config.reps_dir, "init_weights.npy")
-    init_weights_np = np.load(init_weights_path) if os.path.exists(init_weights_path) else None
+    init_weights_path = os.path.join(base_dir, "init_weights.npy")
+    init_weights_np = None
+    if os.path.exists(init_weights_path):
+        init_weights_np = np.load(init_weights_path)
+        print(f"Loaded init weights from {init_weights_path}")
+    else:
+        print("Warning: init_weights.npy not found.")
 
     # Storage for history
     metric_keys = [
@@ -99,34 +104,43 @@ def run_plastic_analysis_pipeline(config):
     current_epoch_counter = 0
     previous_task_final_weights = None 
     
-    # 1. Compute Metrics
-    for t_name in task_names:
-        rep_path = os.path.join(config.reps_dir, f"{t_name}_reps_per_epoch.npy")
-        w_path = os.path.join(config.reps_dir, f"{t_name}_weights_per_epoch.npy")
+    # 2. Iterate through existing task folders
+    for task_idx in range(config.num_tasks):
+        t_name = f"task_{task_idx:03d}"
+        task_dir = os.path.join(base_dir, t_name)
+        
+        rep_path = os.path.join(task_dir, "representations.npy")
+        w_path = os.path.join(task_dir, "weights.npy")
         
         if not os.path.exists(rep_path) or not os.path.exists(w_path):
-            print(f"Skipping {t_name} (Data not found)")
+            print(f"Skipping {t_name} (Files not found in {task_dir})")
             continue
             
         print(f"Processing {t_name}...")
+        
+        # Load Data
+        # reps: (L, R, T, S, H)
         rep_data_np = np.load(rep_path)
+        # weights: (L, R, D)
         w_data_np = np.load(w_path)
         
-        rep_data = jnp.array(rep_data_np)
+        # Reshape Representations to flatten tasks/samples -> (L, R, Total_Samples, H)
+        L, R, T, S, H = rep_data_np.shape
+        rep_data = jnp.array(rep_data_np.reshape(L, R, T * S, H))
         w_data = jnp.array(w_data_np)
         
-        # Asserts for system integrity
-        # Expected: (Steps, Repeats, Samples, Dim)
-        assert rep_data.ndim == 4, f"Invalid rep shape {rep_data.shape}"
-        assert rep_data.shape[1] == config.n_repeats, "Repeat dimension mismatch"
-        assert rep_data.shape[3] == config.hidden_dim, "Hidden dim mismatch"
-
         n_steps = rep_data.shape[0]
         epochs_in_task = n_steps * config.log_frequency
 
+        # Prepare Reference Weights (Broadcasted to R)
         if init_weights_np is not None:
-            init_w_jax = jnp.array(init_weights_np)
+            # Broadcast (D,) -> (R, D) if necessary
+            if init_weights_np.ndim == 1:
+                init_w_jax = jnp.tile(init_weights_np, (R, 1))
+            else:
+                init_w_jax = jnp.array(init_weights_np)
         else:
+            # Fallback to first step of current task
             init_w_jax = w_data[0]
 
         if previous_task_final_weights is not None:
@@ -134,28 +148,36 @@ def run_plastic_analysis_pipeline(config):
         else:
             task_ref_w_jax = init_w_jax
 
+        # Calculate Metrics per Step
         for i in range(n_steps):
+            # rep_data[i] is (R, Total_Samples, H) -> vmap over R
             rep_res = _compute_rep_metrics_batch(rep_data[i], config.hidden_dim)
+            
+            # w_data[i] is (R, D) -> vmap over R
+            # Ensure refs are also (R, D)
             w_res = _compute_weight_metrics_batch(w_data[i], task_ref_w_jax, init_w_jax)
             
             for k, v in rep_res.items(): history[k].append(np.array(v))
             for k, v in w_res.items(): history[k].append(np.array(v))
                 
+        # Update reference for next task (Last step weights)
         previous_task_final_weights = w_data_np[-1]
+        
         current_epoch_counter += epochs_in_task
         task_boundaries.append(current_epoch_counter)
 
-    # 2. Convert to Arrays and Save Data
+    # 3. Convert to Arrays and Save Data
     for k in history:
         if len(history[k]) > 0: 
             history[k] = np.stack(history[k]) # Shape: (Total_Steps, N_Repeats)
 
-    save_data_path = os.path.join(config.reps_dir, f"plastic_analysis_{config.dataset_name}.pkl")
+    # Note: Saving to results_dir (base_dir) now, not reps_dir
+    save_data_path = os.path.join(base_dir, f"plastic_analysis_{config.dataset_name}.pkl")
     with open(save_data_path, 'wb') as f:
         pickle.dump({'history': history, 'task_boundaries': task_boundaries}, f)
     print(f"Plasticine metrics data saved to {save_data_path}")
 
-    # 3. Plotting
+    # 4. Plotting
     metric_names = [m for m in history.keys() if len(history[m]) > 0]
     n_metrics = len(metric_names)
     
@@ -191,7 +213,8 @@ def run_plastic_analysis_pipeline(config):
 
     axes[-1].set_xlabel('Epochs (Continual)')
     plt.tight_layout()
-    # Save to the specific figures_dir (which is now the 'plots' folder)
+    
+    # Save to the config.figures_dir
     save_path = os.path.join(config.figures_dir, f"plasticine_metrics_{config.dataset_name}.png")
     plt.savefig(save_path)
     print(f"Analysis plots saved to {save_path}")

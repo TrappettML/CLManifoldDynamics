@@ -1,5 +1,6 @@
 import os
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".70" 
 
 import jax
 import jax.numpy as jnp
@@ -63,6 +64,12 @@ def main():
     # Create directories
     os.makedirs(config.results_dir, exist_ok=True)
     os.makedirs(config.figures_dir, exist_ok=True)
+
+    # Save Config for analysis scripts to load later
+    with open(os.path.join(config.results_dir, "config.pkl"), 'wb') as f:
+        pickle.dump(config, f)
+    print(f"Configuration saved to {os.path.join(config.results_dir, 'config.pkl')}")
+    # ----------------------
 
     # --- 3. PHASE 1: Pre-compute Class Pairs (Spec Section 2) ---
     num_classes = data_utils.DATASET_CONFIGS[config.dataset_name]['num_classes']
