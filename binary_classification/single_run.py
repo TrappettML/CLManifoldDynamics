@@ -337,8 +337,61 @@ def main():
     train_mean = np.mean(train_acc, axis=1)
     ax1.plot(epochs_range, train_mean, label='Current Task', color='grey', linestyle='-', alpha=0.3)
     
+    # --- Load Baseline Metrics ---
+    mtl_path = os.path.join(config.results_dir, "multitask", "metrics.pkl")
+    rand_path = os.path.join(config.results_dir, "random", "metrics.pkl")
+    
+    mtl_history = None
+    if os.path.exists(mtl_path):
+        with open(mtl_path, 'rb') as f:
+            mtl_history = pickle.load(f)
+
+    rand_history = None
+    if os.path.exists(rand_path):
+        with open(rand_path, 'rb') as f:
+            rand_history = pickle.load(f)
+
+
     for task_name in task_names:
         color = color_dict[task_name]
+        
+        # --- Plot Random Baseline (Horizontal Dotted Line) ---
+        if rand_history and task_name in rand_history['acc']:
+            r_acc = rand_history['acc'][task_name]
+            r_loss = rand_history['loss'][task_name]
+            
+            # Plot scalar mean across repeats
+            ax1.axhline(y=np.nanmean(r_acc), color=color, linestyle=':', alpha=0.5, linewidth=1.5)
+            ax2.axhline(y=np.nanmean(r_loss), color=color, linestyle=':', alpha=0.5, linewidth=1.5)
+
+        # --- Plot Multi-Task Baseline (Dash-Dot Curve) ---
+        if mtl_history and task_name in mtl_history['test_metrics']:
+            m_acc = np.array(mtl_history['test_metrics'][task_name]['acc'])
+            m_loss = np.array(mtl_history['test_metrics'][task_name]['loss'])
+            
+            # Ensure 2D (Epochs, Repeats)
+            if m_acc.ndim == 1: m_acc = m_acc.reshape(-1, config.n_repeats)
+            if m_loss.ndim == 1: m_loss = m_loss.reshape(-1, config.n_repeats)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                m_acc_mean = np.nanmean(m_acc, axis=1)
+                m_loss_mean = np.nanmean(m_loss, axis=1)
+
+            # Mask NaNs (sparse logging)
+            m_mask = ~np.isnan(m_acc_mean)
+            
+            # Plot aligned with global epochs
+            if m_mask.any():
+                # Slice epochs_range in case MTL length differs slightly due to rounding
+                limit = min(len(epochs_range), len(m_acc_mean))
+                ax1.plot(epochs_range[:limit][m_mask[:limit]], m_acc_mean[:limit][m_mask[:limit]], 
+                         color=color, linestyle='-.', linewidth=1.5, alpha=0.7, label=f"{task_name} (MTL)")
+                
+                ax2.plot(epochs_range[:limit][m_mask[:limit]], m_loss_mean[:limit][m_mask[:limit]], 
+                         color=color, linestyle='-.', linewidth=1.5, alpha=0.7)
+
+
         acc = np.array(global_history['test_metrics'][task_name]['acc'])
         if acc.ndim == 1:
             acc = acc.reshape(-1, config.n_repeats)
