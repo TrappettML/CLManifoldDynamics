@@ -2,234 +2,158 @@ import os
 import pickle
 import numpy as np
 import warnings
+from ipdb import set_trace
 
 def compute_metric_differences(experiment_path):
     """
-    Loads experiment configuration and metrics, then computes:
-    1. Delta GLUE/Plasticity: (Metric after Training Task N - Metric after Training Task M)
-       specifically for the case defined: (Task 1 after Training Task 2 - Task 1 after Training Task 1).
-       It generalizes this to: Delta = Val(Eval=i, Train=j) - Val(Eval=i, Train=i) for j > i.
+    Computes:
+    1. CL Deltas: Change in metrics for Task A after training on Task B vs after training on Task A.
     2. CL Metrics: Extracts 'remembering' and 'transfer'.
-    3. MTL Metrics: Extracts mean GLUE and Plasticity values from the MTL baseline.
+    3. MTL Means: Time-averaged metrics for the Multi-Task Learner.
 
     Args:
-        experiment_path (str): Path to the experiment results directory (containing config.pkl and all_metrics.pkl).
-
-    Returns:
-        dict: A dictionary containing 'deltas', 'cl_metrics', and 'mtl_metrics'.
+        experiment_path (str): Path to results (must contain config.pkl and all_metrics.pkl).
     """
-    
-    # --- 1. Load Configuration ---
-    config_path = os.path.join(experiment_path, "config.pkl")
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found at {config_path}")
-        
-    with open(config_path, 'rb') as f:
-        config = pickle.load(f)
-        
-    # --- 2. Load Aggregated Metrics ---
-    metrics_path = os.path.join(experiment_path, "all_metrics.pkl")
-    if not os.path.exists(metrics_path):
-        raise FileNotFoundError(f"Metrics file not found at {metrics_path}. Please run run_all_representation_analysis() first.")
+    print(f"--- Processing Metrics for: {experiment_path} ---")
 
-    with open(metrics_path, 'rb') as f:
-        all_metrics = pickle.load(f)
+    # --- 1. Load Data ---
+    try:
+        with open(os.path.join(experiment_path, "config.pkl"), 'rb') as f:
+            config = pickle.load(f)
+        with open(os.path.join(experiment_path, "all_metrics.pkl"), 'rb') as f:
+            all_metrics = pickle.load(f)
+    except FileNotFoundError as e:
+        print(f"Error loading files: {e}")
+        return None
 
-    # --- 3. Determine Time Indices ---
-    # We need the index corresponding to the "final epoch" of each training task.
-    # Data shape is (Steps, Repeats). Steps = Total_Epochs / log_freq.
-    
-    # Number of log steps per task
-    steps_per_task = config.epochs_per_task // config.log_frequency
-    
-    # Calculate the index of the *last* log entry for each task.
-    # Task 0 ends at index (1 * steps_per_task) - 1
-    # Task 1 ends at index (2 * steps_per_task) - 1
-    task_end_indices = [((t + 1) * steps_per_task) - 1 for t in range(config.num_tasks)]
-    
     results = {
-        'deltas': {'glue': {}, 'plasticity': {}},
-        'cl_metrics': {},
-        'mtl_metrics': {'glue': {}, 'plasticity': {}}
+        'glue_deltas': {},         # {metric: { 'task_0_after_task_1': [repeats] }}
+        'plasticity_deltas': {},   # {metric: { 'task_0_to_1': [repeats] }}
+        'cl_metrics': {},          # { 'remembering': [repeats], ... }
+        'mtl_glue_means': {},      # { task: { metric: [repeats] } }
+        'mtl_plasticity_means': {} # { metric: [repeats] }
     }
+    # set_trace()
+    # --- Helper: Ensure Data is Numpy Array ---
+    def ensure_stack(data_obj):
+        """Fixes issue where CL metrics might be lists of arrays instead of stacked arrays."""
+        if isinstance(data_obj, list):
+            return np.stack(data_obj)
+        return data_obj
 
-    # =========================================================
-    # PART A: GLUE Metric Differences
-    # Formula: Delta = Metric(Eval=T_i, Train=T_j) - Metric(Eval=T_i, Train=T_i)
-    # This represents how much the metric changed for Task i after training on Task j.
-    # =========================================================
-    
+    # --- 2. CL GLUE Deltas ---
+    # Goal: Delta = Metric(Eval=T0, State=End_of_T1) - Metric(Eval=T0, State=End_of_T0)
     if 'glue' in all_metrics and all_metrics['glue']:
-        glue_data = all_metrics['glue']
-        # glue_data structure: [train_task_name][eval_task_name][metric_name] -> (Steps, Repeats)
+        cl_glue = all_metrics['glue']
         
-        # Get list of task names to iterate in order (task_000, task_001...)
-        task_names = sorted([f"task_{i:03d}" for i in range(config.num_tasks)])
+        # We need the list of task names in chronological order
+        sorted_tasks = sorted([t for t in cl_glue.keys() if t.startswith('task_')])
         
-        # We need the list of metric names (e.g., Capacity, Dimension...)
-        # Grab from the first available entry
-        first_train = task_names[0]
-        first_eval = task_names[0]
-        metric_names = list(glue_data[first_train][first_eval].keys())
+        # Extract metric names from the first valid entry
+        first_valid = cl_glue[sorted_tasks[0]][sorted_tasks[0]]
+        metric_names = list(first_valid.keys())
 
-        for m_name in metric_names:
-            results['deltas']['glue'][m_name] = {}
+        for metric in metric_names:
+            results['glue_deltas'][metric] = {}
 
-            # Iterate over EVALUATION tasks (The task we are measuring)
-            for i, eval_task in enumerate(task_names):
+            # Iterate over the EVALUATED task (The task being remembered)
+            for i in range(len(sorted_tasks)):
+                eval_task = sorted_tasks[i]
                 
-                # We can only compute forgetting/change if there are subsequent training tasks.
-                # If this is the last task, it has no "future" training to disturb it.
-                if i >= config.num_tasks - 1:
-                    continue
-
-                # 1. Get Baseline: Value at the end of training Task i
-                # Note: The glue_data structure is hierarchical by train_task.
-                # We need to look up glue_data[eval_task][eval_task] because T_i is trained in phase T_i.
+                # Get the baseline: State of Eval Task i immediately after training Task i
                 try:
-                    # Data for "Train on i, Eval on i"
-                    base_series = glue_data[eval_task][eval_task][m_name] # (Steps, Repeats)
-                    
-                    # The steps in this specific array correspond to the training of eval_task.
-                    # So we just take the last element (-1) of this specific training block.
-                    base_val = base_series[-1, :] # (Repeats,)
-                    
-                except KeyError:
-                    warnings.warn(f"Missing GLUE baseline for Eval {eval_task}, Metric {m_name}")
+                    # Data: Train=i, Eval=i
+                    base_data = ensure_stack(cl_glue[eval_task][eval_task][metric])
+                    # Value at the final step of this training phase
+                    val_base = base_data[-1] 
+                except (KeyError, IndexError) as e:
+                    # Task might not have been evaluated or data missing
                     continue
 
-                # 2. Get Subsequent Values: Value at end of training Task j (j > i)
-                for j in range(i + 1, config.num_tasks):
-                    train_task = task_names[j]
+                # Iterate over FUTURE training phases (The tasks causing interference)
+                for j in range(i + 1, len(sorted_tasks)):
+                    train_task = sorted_tasks[j]
                     
                     try:
-                        # Data for "Train on j, Eval on i"
-                        curr_series = glue_data[train_task][eval_task][m_name]
-                        curr_val = curr_series[-1, :] # End of training task j
+                        # Data: Train=j, Eval=i
+                        # We want the state at the END of training task j
+                        curr_data = ensure_stack(cl_glue[train_task][eval_task][metric])
+                        val_curr = curr_data[-1]
+
+                        # Compute Delta: (Post - Pre)
+                        diff = val_curr - val_base
                         
-                        # 3. Compute Difference
-                        diff = curr_val - base_val
+                        # Key format: "task_000_after_training_task_001"
+                        key = f"{eval_task}_after_training_{train_task}"
+                        results['glue_deltas'][metric][key] = diff
                         
-                        # Store Key: "eval_task_000_trained_on_task_001"
-                        key = f"eval_{eval_task}_after_{train_task}"
-                        results['deltas']['glue'][m_name][key] = diff
-                        
-                    except KeyError:
+                    except (KeyError, IndexError):
                         continue
 
-    # =========================================================
-    # PART B: Plasticity Metric Differences
-    # Plasticity metrics are continuous (global), not per-task.
-    # Formula: Delta = Metric(End of Task j) - Metric(End of Task i)
-    # =========================================================
-    
+    # --- 3. CL Plasticity Deltas ---
+    # Plasticity is a global time-series. We slice it at task boundaries.
     if 'plasticity' in all_metrics and all_metrics['plasticity']:
-        plast_data = all_metrics['plasticity'] # {metric_name: (Total_Steps, Repeats)}
+        cl_plast = all_metrics['plasticity']
         
-        for m_name, series in plast_data.items():
-            results['deltas']['plasticity'][m_name] = {}
+        steps_per_task = config.epochs_per_task // config.log_frequency
+        
+        for metric, data_raw in cl_plast.items():
+            data = ensure_stack(data_raw) # (Total_Steps, Repeats)
+            results['plasticity_deltas'][metric] = {}
             
-            # Iterate through tasks to find "shifts"
-            for i in range(config.num_tasks):
-                idx_i = task_end_indices[i]
+            # Iterate transitions
+            for i in range(config.num_tasks - 1):
+                # End index of Task i (0-based)
+                # If steps_per_task=50. Task 0 ends at 49. Task 1 ends at 99.
+                idx_i = ((i + 1) * steps_per_task) - 1
                 
-                # Ensure index exists (in case run was short)
-                if idx_i >= series.shape[0]:
-                    continue
-                    
-                val_i = series[idx_i, :]
+                # End index of Task i+1
+                idx_j = ((i + 2) * steps_per_task) - 1
                 
-                # Compare against future tasks
-                for j in range(i + 1, config.num_tasks):
-                    idx_j = task_end_indices[j]
-                    
-                    if idx_j >= series.shape[0]:
-                        continue
-                        
-                    val_j = series[idx_j, :]
+                # Safety check for array bounds
+                if idx_j < data.shape[0]:
+                    val_i = data[idx_i]
+                    val_j = data[idx_j]
                     
                     diff = val_j - val_i
                     
-                    key = f"change_from_task_{i:03d}_to_{j:03d}"
-                    results['deltas']['plasticity'][m_name][key] = diff
+                    key = f"delta_task_{i:03d}_to_{i+1:03d}"
+                    results['plasticity_deltas'][metric][key] = diff
 
-    # =========================================================
-    # PART C: CL Metrics (Transfer & Remembering)
-    # =========================================================
-    
-    if 'cl' in all_metrics and 'remembering' in all_metrics['cl']:
-        # These were already computed as per-repeat vectors in run_analysis.py
-        # We assume they are stored as (Repeats,) or (N, Repeats) in the dictionary
-        # Based on previous code: {'remembering': array, 'transfer': array}
-        
-        # Just copy them over
-        cl_data = all_metrics['cl']
-        for k in ['remembering', 'transfer']:
-            if k in cl_data:
-                results['cl_metrics'][k] = cl_data[k]
-                
-        # Also grab raw accuracy per task if needed, but Transfer/Remembering are the requested summaries.
+    # --- 4. CL Metrics (Transfer/Remembering) ---
+    if 'cl' in all_metrics:
+        # These are usually 1D arrays of length (Repeats)
+        for key in ['remembering', 'transfer']:
+            if key in all_metrics['cl']:
+                results['cl_metrics'][key] = ensure_stack(all_metrics['cl'][key])
 
-    # =========================================================
-    # PART D: MTL Metrics (Baseline Means)
-    # =========================================================
-    
+    # --- 5. MTL Means (Averaged over Time) ---
     if 'mtl' in all_metrics and all_metrics['mtl']:
         mtl_data = all_metrics['mtl']
-        
-        # 1. MTL GLUE
-        # Structure: mtl_data['glue'][train_task_name][metric] -> (Steps, Repeats)
-        # Note: In MTL, "train_task_name" in the pickle usually corresponds to the evaluated task
-        # because MTL representation analysis iterates over eval tasks (see run_mtl_glue_analysis).
-        if 'glue' in mtl_data:
-            for task_name, metrics_dict in mtl_data['glue'].items():
-                for m_name, series in metrics_dict.items():
-                    if m_name not in results['mtl_metrics']['glue']:
-                        results['mtl_metrics']['glue'][m_name] = {}
-                    
-                    # We take the mean over the *entire* MTL training run or the final value?
-                    # The prompt asks for "mean glue metrics".
-                    # MTL runs are often stable. We will take the mean of the *final* epoch
-                    # across repeats to be consistent with "final state" comparison,
-                    # OR the mean over time if requested.
-                    # Let's stick to the "values at the final epoch" logic for consistency.
-                    final_vals = series[-1, :] # (Repeats,)
-                    results['mtl_metrics']['glue'][m_name][task_name] = final_vals
 
-        # 2. MTL Plasticity
-        # Structure: mtl_data['plasticity'][metric] -> (Steps, Repeats)
+        # A. MTL Plasticity: Mean over time for each metric
         if 'plasticity' in mtl_data:
-            for m_name, series in mtl_data['plasticity'].items():
-                # "mean plasticity values... for each repeat"
-                # Since plasticity changes during training, "mean" likely implies
-                # the average value across the training trajectory for the MTL agent.
-                mean_vals = np.nanmean(series, axis=0) # Mean over time -> (Repeats,)
-                results['mtl_metrics']['plasticity'][m_name] = mean_vals
+            for metric, data_raw in mtl_data['plasticity'].items():
+                data = ensure_stack(data_raw) # (Steps, Repeats)
+                # Mean over time axis (0) -> Result shape (Repeats,)
+                results['mtl_plasticity_means'][metric] = np.mean(data, axis=0)
+
+        # B. MTL GLUE: Mean over time for each metric, separated by task
+        if 'glue' in mtl_data:
+            # MTL GLUE structure is {eval_task: {metric: (Steps, Repeats)}}
+            for task_name, task_metrics in mtl_data['glue'].items():
+                results['mtl_glue_means'][task_name] = {}
+                
+                for metric, data_raw in task_metrics.items():
+                    data = ensure_stack(data_raw) # (Steps, Repeats)
+                    # Mean over time axis (0) -> Result shape (Repeats,)
+                    results['mtl_glue_means'][task_name][metric] = np.mean(data, axis=0)
+    set_trace()
+    print("--- Metrics Calculation Complete ---")
 
     return results
 
-# --- Example Usage Block ---
 if __name__ == "__main__":
-    # Update this path to your actual experiment folder
-    exp_path = "/home/users/MTrappett/manifold/binary_classification/results/mnist/RL/"
-    
-    try:
-        data = compute_metric_differences(exp_path)
-        
-        print("\n=== Analysis Complete ===")
-        
-        print("\n--- CL Metrics (Mean +/- Std) ---")
-        for k, v in data['cl_metrics'].items():
-            print(f"{k}: {np.mean(v):.4f} +/- {np.std(v):.4f}")
-
-        print("\n--- GLUE Deltas (Example: Capacity) ---")
-        if 'Capacity' in data['deltas']['glue']:
-            for k, v in data['deltas']['glue']['Capacity'].items():
-                print(f"{k}: {np.mean(v):.4f}")
-                
-        print("\n--- MTL Metrics (Example: Plasticity) ---")
-        for k, v in data['mtl_metrics']['plasticity'].items():
-            print(f"{k}: {np.mean(v):.4f}")
-            
-    except Exception as e:
-        print(f"Analysis failed: {e}")
+    # Example usage
+    EXP_PATH = "/home/users/MTrappett/manifold/binary_classification/results/mnist/RL/"
+    computed_data = compute_metric_differences(EXP_PATH)
