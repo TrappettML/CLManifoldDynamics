@@ -61,7 +61,7 @@ def run_glue_analysis_pipeline(config):
     devices = jax.devices()
     num_devices = len(devices)
     print(f"Detected {num_devices} device(s): {[d.platform for d in devices]}", flush=True)
-    set_trace()
+    # set_trace()
     
     # This replaces the need for explicit pmap
     sharding = jax.sharding.PositionalSharding(devices)
