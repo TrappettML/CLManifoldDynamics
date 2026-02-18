@@ -34,9 +34,9 @@ def get_config(dataset_name, algorithm) -> ml_collections.ConfigDict:
     config.weight_decay = 0.0
     
     # Training Schedule
-    config.epochs_per_task = 500
+    config.epochs_per_task = 1000
     config.log_frequency = 10
-    config.n_repeats = 20
+    config.n_repeats = 30
     
     if config.epochs_per_task % config.log_frequency != 0:
         raise ValueError("epochs_per_task must be divisible by log_frequency")
