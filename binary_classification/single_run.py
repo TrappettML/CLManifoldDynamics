@@ -17,6 +17,7 @@ from learner import ContinualLearner
 from expert_trainer import train_single_expert, run_random_baseline, train_multitask
 from models import CLHook
 import cl_analysis
+from timer_class import Timer
 
 
 
@@ -475,4 +476,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    with Timer(print_time=True, show_memory=False):
+        main()

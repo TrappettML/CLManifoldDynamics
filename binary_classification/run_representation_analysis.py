@@ -54,11 +54,18 @@ def _prep_glue_batch(reps_batch, labels_batch, P, M, H):
     return jnp.array(formatted)
 
 def run_glue_analysis_pipeline(config):
-    print("\n--- Starting GLUE Metric Analysis ---")
+    print("\n--- Starting GLUE Metric Analysis (Distributed) ---")
     
-    # --- 1. Setup ---
-    # Metrics map based on run_glue_solver output tuple indices
-    # (capacity, dimension, radius, center_align, axis_align, center_axis_align, approx_capacity)
+    # --- 1. Setup Distributed Environment ---
+    devices = jax.devices()
+    num_devices = len(devices)
+    print(f"Detected {num_devices} device(s): {[d.platform for d in devices]}")
+
+    # Create a Sharding spec that splits the first dimension (Batch) across devices
+    # This replaces the need for explicit pmap
+    sharding = jax.sharding.PositionalSharding(devices)
+
+    # Metrics map 
     metric_names = [
         'Capacity', 'Dimension', 'Radius', 
         'Center Alignment', 'Axis Alignment', 'Center-Axis Alignment', 
@@ -66,42 +73,29 @@ def run_glue_analysis_pipeline(config):
     ]
     
     # Constants
-    P = 2 # Always binary classification per task in this setup
-    M = config.analysis_subsamples # As requested
+    P = 2 
+    M = config.analysis_subsamples 
     N = config.hidden_dim
     n_t = config.n_t
     
     # Initialize Solver
     qp = OSQP(tol=1e-4)
 
-    # --- Distributed Setup (JIT + Sharding) ---
-    # This automatically handles 1 or more GPUs by sharding the first axis (R)
-    devices = jax.devices()
-    sharding = jax.sharding.PositionalSharding(devices)
-    
+    # --- 2. JIT-Compiled Compute Step ---
+    # We VMAP over the chunk. Because we pass in Sharded arrays, 
+    # JAX automatically runs this in parallel across devices.
     @jax.jit
-    def distributed_glue(keys, data):
+    def distributed_glue_step(keys, data):
         return jax.vmap(
             partial(run_glue_solver, P=P, M=M, N=N, n_t=n_t, qp_solver=qp),
             in_axes=(0, 0)
         )(keys, data)
     
-    # Create Vmapped Solver: (Key, Data) -> Metrics
-    # Data shape: (R, P, M, H) -> Vmap over R (axis 0)
-    # run_glue_solver expects data: (P, M, N)
-    vmapped_glue = jax.vmap(
-        partial(run_glue_solver, P=P, M=M, N=N, n_t=n_t, qp_solver=qp),
-        in_axes=(0, 0) # Split key and data across R
-    )
-    
-    # Main Results Storage: results[train_task][eval_task][metric] -> (Steps, Repeats)
+    # Main Results Storage
     full_results = {}
-    
-    # Master Key
     master_key = jax.random.PRNGKey(config.seed)
 
-    # --- 2. Process Training Tasks ---
-    # We iterate over the tasks as they were trained (folders task_000, task_001...)
+    # --- 3. Process Training Tasks ---
     for train_task_idx in range(config.num_tasks):
         train_task_name = f"task_{train_task_idx:03d}"
         task_dir = os.path.join(config.results_dir, train_task_name)
@@ -116,68 +110,95 @@ def run_glue_analysis_pipeline(config):
         print(f"Processing Training Phase: {train_task_name}...")
         
         # Load Data
-        # reps: (L_steps, R_repeats, T_eval, S_samples, H_dim)
-        reps_data = np.load(reps_path)
-        # lbls: (R_repeats, T_eval, S_samples) - Labels are constant over time
-        lbls_data = np.load(lbls_path)
+        reps_data = np.load(reps_path) # (L, R, T_eval, S, H)
+        lbls_data = np.load(lbls_path) # (R, T_eval, S)
         
         L, R, T_eval, S, H = reps_data.shape
-        
-        # Verify M matches config
-        assert S == config.analysis_subsamples, f"Data subsamples {S} != config {config.analysis_subsamples}"
-        
         full_results[train_task_name] = {}
 
-        # --- 3. Iterate over Evaluated Tasks ---
+        # --- CHUNKING CONFIGURATION ---
+        # 1. Determine items per GPU (e.g., 5 repeats per GPU per step)
+        #    Adjust this if you hit OOM.
+        REPEATS_PER_DEVICE = 5 
+        
+        # 2. Total Chunk Size (Must be multiple of num_devices for efficiency)
+        CHUNK_SIZE = REPEATS_PER_DEVICE * num_devices
+        
+        print(f"  > Processing strategy: Total Repeats={R} | Devices={num_devices} | Chunk Size={CHUNK_SIZE}")
+
+        # Iterate over Evaluated Tasks
         for eval_task_idx in range(T_eval):
             eval_task_name = f"task_{eval_task_idx:03d}"
             full_results[train_task_name][eval_task_name] = {m: [] for m in metric_names}
             
-            # Extract labels for this specific evaluation task (constant across L)
-            # Shape: (R, S)
-            current_eval_lbls = lbls_data[:, eval_task_idx, :]
+            # Extract labels (constant across time L)
+            current_eval_lbls = lbls_data[:, eval_task_idx, :] # (R, S)
             
             # Iterate Time Steps
-            for step in tqdm(range(L)):
-                # Shape: (R, S, H)
-                current_reps = reps_data[step, :, eval_task_idx, :, :]
+            for step in tqdm(range(L), desc=f"  {eval_task_name}", leave=False):
+                current_reps = reps_data[step, :, eval_task_idx, :, :] # (R, S, H)
+                formatted_data = _prep_glue_batch(current_reps, current_eval_lbls, P, M, H) # (R, P, M, H)
                 
-                # Format Data: (R, P, M, H)
-                formatted_data = _prep_glue_batch(current_reps, current_eval_lbls, P, M, H)
-                
-                # Generate Keys for this batch
+                # Keys
                 step_key = jax.random.fold_in(master_key, train_task_idx * 10000 + step)
                 batch_keys = jax.random.split(step_key, R)
                 
-                # --- CHUNKING UPDATE ---
-                # CONFIG: Set this to 10 as requested (assuming ~30 repeats total -> 3 chunks)
-                REPEAT_CHUNK_SIZE = 10 
-                
-                # Temporary storage to hold results from each chunk
-                # List of lists: [ [chunk1_metric1, chunk2_metric1], [chunk1_metric2...] ]
+                # Helper to collect results from chunks
                 chunked_accumulators = [[] for _ in range(len(metric_names))]
 
-                # Iterate through the repeats (R) in chunks
-                for i in range(0, R, REPEAT_CHUNK_SIZE):
-                    # Slice the keys and data
-                    # JAX handles the last chunk automatically even if it's smaller than CHUNK_SIZE
-                    batch_keys_chunk = batch_keys[i : i + REPEAT_CHUNK_SIZE]
-                    data_chunk = formatted_data[i : i + REPEAT_CHUNK_SIZE]
+                # --- PROCESS IN CHUNKS ---
+                for i in range(0, R, CHUNK_SIZE):
+                    # 1. Slice
+                    batch_keys_chunk = batch_keys[i : i + CHUNK_SIZE]
+                    data_chunk = formatted_data[i : i + CHUNK_SIZE]
                     
-                    # Run GLUE on this specific chunk
-                    chunk_metrics_tuple, _, _ = vmapped_glue(batch_keys_chunk, data_chunk)
+                    actual_batch_size = data_chunk.shape[0]
                     
-                    # Collect the results
-                    for m_idx, metric_val in enumerate(chunk_metrics_tuple):
-                        chunked_accumulators[m_idx].append(metric_val)
+                    # 2. PADDING (Crucial for Robustness)
+                    # We pad to CHUNK_SIZE so the JIT function always sees the same shape.
+                    # This avoids recompilation for the last uneven batch and ensures 
+                    # the data divides evenly across devices.
+                    pad_needed = CHUNK_SIZE - actual_batch_size
+                    
+                    if pad_needed > 0:
+                        # Pad Keys (R,)
+                        keys_padded = jnp.pad(batch_keys_chunk, ((0, pad_needed), (0,0)), constant_values=0)
+                        # Pad Data (R, P, M, H)
+                        data_padded = jnp.pad(data_chunk, ((0, pad_needed), (0,0), (0,0), (0,0)), constant_values=0)
+                    else:
+                        keys_padded = batch_keys_chunk
+                        data_padded = data_chunk
 
-                # Reassemble chunks and store in full_results
-                for i, name in enumerate(metric_names):
-                    # Concatenate all chunks to restore shape (R,)
-                    full_metric_array = jnp.concatenate(chunked_accumulators[i], axis=0)
+                    # 3. DISTRIBUTE (Sharding)
+                    # Explicitly push data to devices according to our sharding spec
+                    keys_device = jax.device_put(keys_padded, sharding)
+                    data_device = jax.device_put(data_padded, sharding)
                     
-                    # Convert to numpy and append to the main history
-                    full_results[train_task_name][eval_task_name][name].append(np.array(full_metric_array))
+                    # 4. COMPUTE
+                    metrics_tuple, _, _ = distributed_glue_step(keys_device, data_device)
+                    
+                    # 5. UNPAD and COLLECT
+                    for m_idx, metric_val in enumerate(metrics_tuple):
+                        # Move back to host/numpy and slice off padding
+                        val_np = np.array(metric_val)
+                        if pad_needed > 0:
+                            val_np = val_np[:actual_batch_size]
+                        chunked_accumulators[m_idx].append(val_np)
+
+                # Reassemble chunks
+                for i, name in enumerate(metric_names):
+                    full_metric_array = np.concatenate(chunked_accumulators[i], axis=0)
+                    full_results[train_task_name][eval_task_name][name].append(full_metric_array)
+
+            # --- CRITICAL FIX: STACK LISTS INTO ARRAYS ---
+            # The plotting function expects (Steps, Repeats) arrays, not lists.
+            # We do this once per task, after all time steps are collected.
+            for name in metric_names:
+                # Convert List of (R,) arrays -> Single (L, R) array
+                full_results[train_task_name][eval_task_name][name] = np.stack(
+                    full_results[train_task_name][eval_task_name][name], 
+                    axis=0
+                )
 
     # --- 4. Save Results ---
     save_path = os.path.join(config.results_dir, "glue_metrics.pkl")
@@ -185,7 +206,7 @@ def run_glue_analysis_pipeline(config):
         pickle.dump(full_results, f)
     print(f"GLUE metrics saved to {save_path}")
 
-    # --- 5. Plotting (Replicating style of plastic_analysis) ---
+    # Plot
     _plot_glue_results(full_results, metric_names, config)
 
 
@@ -468,7 +489,7 @@ def run_mtl_glue_analysis(config):
     print(f"MTL GLUE metrics saved to {save_path}")
 
 
-def run_all_representation_analysis():
+def run_all_representation_analysis(experiment_path):
     """
     Orchestrates the complete analysis suite for an experiment.
     
@@ -485,7 +506,6 @@ def run_all_representation_analysis():
     Orchestrates the complete analysis suite for an experiment.
     Loads config from the experiment directory.
     """
-    experiment_path = "/home/users/MTrappett/manifold/binary_classification/results/mnist/RL/"
     # --- 1. Load Configuration ---
     config_path = os.path.join(experiment_path, "config.pkl")
     if not os.path.exists(config_path):
@@ -620,4 +640,5 @@ def run_all_representation_analysis():
 
 
 if __name__=='__main__':
-    run_all_representation_analysis()
+    experiment_path = "/home/users/MTrappett/manifold/binary_classification/results/mnist/SL/"
+    run_all_representation_analysis(experiment_path)
