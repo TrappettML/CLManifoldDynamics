@@ -64,7 +64,7 @@ def run_glue_analysis_pipeline(config):
     # set_trace()
     
     # This replaces the need for explicit pmap
-    sharding = jax.sharding.PositionalSharding(devices)
+    # sharding = jax.sharding.PositionalSharding(devices)
 
     # Metrics map 
     metric_names = [
