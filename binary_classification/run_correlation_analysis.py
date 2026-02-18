@@ -7,15 +7,28 @@ from scipy.stats import pearsonr
 import scipy.cluster.hierarchy as sch
 import scipy.spatial.distance as ssd
 
+import os
+import pickle
+import numpy as np
+import jax.numpy as jnp
+import matplotlib.pyplot as plt
+from scipy.stats import pearsonr
+import scipy.cluster.hierarchy as sch
+import scipy.spatial.distance as ssd
+
 def compute_metric_differences(experiment_path):
     """
-    Computes analysis matrices for GLUE, Plasticity, and CL metrics.
+    Computes relative difference matrices focusing on the transition 
+    from Task 0 to Task 1.
+    
+    Calculation: (Val_End_T1 - Val_End_T0) / (Val_End_T1 + Val_End_T0)
+    Result: Positive value implies the metric increased during Task 1.
     
     Returns:
         results (dict): Contains:
-            - 'glue': {metric_name: {'raw': Matrix, 'relative': Matrix}}
-            - 'plasticity': {metric_name: Delta_Vector}
-            - 'cl': {metric_name: Vector/Matrix}
+            - 'glue': {metric_name: {eval_task_id: rel_diff_vector}}
+            - 'plasticity': {metric_name: rel_diff_vector}
+            - 'cl': {metric_name: Vector}
     """
     print(f"--- Processing Metrics for: {experiment_path} ---")
 
@@ -34,122 +47,172 @@ def compute_metric_differences(experiment_path):
         'cl': {}
     }
 
+    # Helper for safe relative difference
+    def calc_rel_diff(v0, v1):
+        # (t1 - t0) / (t1 + t0)
+        num = v1 - v0
+        denom = v1 + v0
+        # Add epsilon where denom is 0 to avoid NaNs, preserve sign elsewhere
+        denom = np.where(denom == 0, 1e-9, denom) 
+        return num / denom
+
     # --- 2. Process CL Metrics (Direct Load) ---
     if os.path.exists(cl_path):
         try:
             with open(cl_path, 'rb') as f:
                 cl_data = pickle.load(f)
-            # cl_data structure: {'transfer': array, 'remembering': array, 'stats': dict}
             results['cl'] = cl_data
             print(f"  [x] Loaded CL Metrics from {os.path.basename(cl_path)}")
         except Exception as e:
             print(f"  [!] Error loading CL metrics: {e}")
-    else:
-        print(f"  [ ] CL metrics file not found: {cl_path}")
 
-    # --- 3. Process GLUE Metrics (Full Matrix) ---
+    # --- 3. Process GLUE Metrics ---
     if os.path.exists(glue_path):
         try:
             with open(glue_path, 'rb') as f:
                 glue_data = pickle.load(f)
             
-            # glue_data: {train_task: {eval_task: {metric: [steps, repeats]}}}
-            train_tasks = sorted(list(glue_data.keys()))
-            if not train_tasks:
-                 raise ValueError("Glue data is empty")
-            
-            eval_tasks = sorted(list(glue_data[train_tasks[0]].keys()))
-            metric_names = list(glue_data[train_tasks[0]][eval_tasks[0]].keys())
-            
-            n_train = len(train_tasks)
-            n_eval = len(eval_tasks)
-            
-            # Determine n_repeats from data
-            sample_data = glue_data[train_tasks[0]][eval_tasks[0]][metric_names[0]]
-            if isinstance(sample_data, list):
-                n_repeats = sample_data[0].shape[0] 
+            # glue_data structure: {train_task: {eval_task: {metric: [steps, repeats]}}}
+            if 0 not in glue_data or 1 not in glue_data:
+                 print("  [!] GLUE data missing Task 0 or Task 1 data.")
             else:
-                n_repeats = sample_data.shape[1] 
-
-            for metric in metric_names:
-                # Shape: (N_Eval, N_Train, N_Repeats)
-                M_raw = np.zeros((n_eval, n_train, n_repeats))
-                M_raw[:] = np.nan
+                # Get list of eval tasks and metrics from the first training block
+                sample_train_block = glue_data[0]
+                eval_tasks = sorted(list(sample_train_block.keys()))
+                metric_names = list(sample_train_block[eval_tasks[0]].keys())
                 
-                for j, t_train in enumerate(train_tasks):
-                    for i, t_eval in enumerate(eval_tasks):
+                for metric in metric_names:
+                    results['glue'][metric] = {}
+                    
+                    for t_eval in eval_tasks:
                         try:
-                            # Extract time series
-                            series = glue_data[t_train][t_eval][metric]
-                            if isinstance(series, list):
-                                series = np.stack(series)
+                            # 1. Get value at End of Task 0 (t0)
+                            series_t0 = glue_data[0][t_eval][metric]
+                            if isinstance(series_t0, list): series_t0 = np.stack(series_t0)
+                            val_t0 = series_t0[-1] 
                             
-                            # Take the FINAL value of this training phase
-                            val_final = series[-1] # (Repeats,)
-                            M_raw[i, j, :] = val_final
+                            # 2. Get value at End of Task 1 (t1)
+                            series_t1 = glue_data[1][t_eval][metric]
+                            if isinstance(series_t1, list): series_t1 = np.stack(series_t1)
+                            val_t1 = series_t1[-1] 
+                            
+                            # 3. Calculate Relative Difference
+                            rel_diff = calc_rel_diff(val_t0, val_t1)
+                            
+                            results['glue'][metric][t_eval] = rel_diff
+                            
                         except (KeyError, IndexError):
                             pass
                 
-                # Compute Relative Difference Matrix
-                M_diag = np.zeros((n_eval, n_repeats))
-                for k in range(min(n_eval, n_train)):
-                    M_diag[k, :] = M_raw[k, k, :]
-                
-                M_diag_expanded = M_diag[:, np.newaxis, :]
-                denom = M_diag_expanded + M_raw
-                eps = 1e-9
-                M_rel = (M_diag_expanded - M_raw) / (denom + eps)
-                
-                results['glue'][metric] = {
-                    'raw': M_raw,           
-                    'relative': M_rel,      
-                    'diagonal': M_diag      
-                }
-            
-            print(f"  [x] Processed GLUE matrices for {len(metric_names)} metrics")
+                print(f"  [x] Processed GLUE relative differences")
             
         except Exception as e:
             print(f"  [!] Error processing GLUE metrics: {e}")
     else:
         print(f"  [ ] GLUE metrics file not found: {glue_path}")
 
-    # --- 4. Process Plasticity (Deltas) ---
+    # --- 4. Process Plasticity (Relative Deltas) ---
     if os.path.exists(plast_path):
         try:
             with open(plast_path, 'rb') as f:
                 plast_data = pickle.load(f)
             
             history = plast_data.get('history', {})
-            # Calculate deltas between task boundaries
+            samples_per_task = config.epochs_per_task // config.log_frequency
+            
+            idx_end_t0 = samples_per_task - 1          # End of Task 0 (t0)
+            idx_end_t1 = (2 * samples_per_task) - 1    # End of Task 1 (t1)
             
             for metric, data in history.items():
                 if isinstance(data, list):
                     data = np.stack(data)
                 
-                results['plasticity'][metric] = {}
-                samples_per_task = config.epochs_per_task // config.log_frequency
-                
-                for t in range(config.num_tasks):
-                    idx_start = t * samples_per_task
-                    idx_end = (t + 1) * samples_per_task - 1
+                # Ensure we have enough data to reach end of Task 1
+                if data.shape[0] > idx_end_t1:
+                    val_t0 = data[idx_end_t0]   # End Task 0
+                    val_t1 = data[idx_end_t1]   # End Task 1
                     
-                    if idx_end < data.shape[0]:
-                        val_initial = data[idx_start]
-                        val_final = data[idx_end]
-                        
-                        delta = val_final - val_initial
-                        results['plasticity'][metric][f"delta_task_{t:03d}"] = delta
-                        # results['plasticity'][metric][f"value_task_{t:03d}"] = val_final
+                    # (t1 - t0) / (t1 + t0)
+                    rel_delta = calc_rel_diff(val_t0, val_t1)
+                    
+                    results['plasticity'][metric] = rel_delta
+                else:
+                    print(f"  [!] Not enough steps in plasticity {metric}")
 
-            print(f"  [x] Processed Plasticity metrics")
+            print(f"  [x] Processed Plasticity relative differences")
             
         except Exception as e:
             print(f"  [!] Error processing Plasticity metrics: {e}")
     else:
         print(f"  [ ] Plasticity metrics file not found: {plast_path}")
 
-    print("--- Metrics Calculation Complete ---")
     return results
+
+def _flatten_metrics(computed_data):
+    """
+    Helper to flatten the simplified metric dictionary into 1D arrays (repeats).
+    """
+    flat_data = {}
+    
+    # 1. Flatten Plasticity
+    if 'plasticity' in computed_data:
+        for metric, vector in computed_data['plasticity'].items():
+            # Clean up name: "Weight Mag Delta" -> "Plast_Weight"
+            short_metric = metric.split(" ")[0] 
+            # RelDiff indicates (t1-t0)/(t1+t0)
+            key = f"Plast_{short_metric}_RelDiff"
+            flat_data[key] = np.array(vector)
+
+    # 2. Flatten GLUE
+    if 'glue' in computed_data:
+        for metric, eval_dict in computed_data['glue'].items():
+            for t_eval, vector in eval_dict.items():
+                # Key: Glue_{Metric}_EvalT{TaskID}_RelDiff
+                key = f"Glue_{metric}_EvalT{t_eval}_RelDiff"
+                flat_data[key] = np.array(vector)
+
+    # 3. Flatten CL (Standard Processing)
+    if 'cl' in computed_data:
+        cl = computed_data['cl']
+        
+        # Transfer
+        if 'transfer' in cl:
+            trans = cl['transfer']
+            if isinstance(trans, (np.ndarray, jnp.ndarray)):
+                if trans.ndim == 2:
+                    # Only take first few tasks if desired, or all
+                    for t in range(trans.shape[0]):
+                        flat_data[f"CL_Transfer_T{t}"] = np.array(trans[t, :])
+        
+        # Remembering (Pair-Specific)
+        if 'remembering' in cl:
+            rem = cl['remembering']
+            if isinstance(rem, (np.ndarray, jnp.ndarray)) and rem.ndim == 3:
+                n_eval, n_train, _ = rem.shape
+                # Usually we care about Eval 0 after Train 1 (Forgetting of T0)
+                if n_eval > 0 and n_train > 1:
+                     vec = rem[0, 1, :] # Eval T0 after Train T1
+                     flat_data["CL_Rem_Eval0_Train1"] = np.array(vec)
+
+        # Average Accuracy
+        if 'stats' in cl and 'accuracy' in cl['stats']:
+            acc = cl['stats']['accuracy']
+            if isinstance(acc, (np.ndarray, jnp.ndarray)) and acc.ndim == 2:
+                 flat_data['CL_Avg_Accuracy'] = np.mean(acc, axis=1)
+
+    # --- Validation ---
+    clean_data = {}
+    for key, val in flat_data.items():
+        if len(val) < 2: continue
+        
+        var = np.nanvar(val)
+        if np.isnan(var) or var < 1e-12:
+            pass
+        else:
+            clean_data[key] = val
+
+    return clean_data
+
 
 def metric_x_metric_plot(x_data, y_data, x_label, y_label, title, save_path):
     """
@@ -235,105 +298,6 @@ def correlation_heatmap(correlations, labels, save_path):
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
-
-def _flatten_metrics(computed_data):
-    """
-    Helper to flatten nested metric dictionaries into a single dictionary of 
-    1D arrays (vectors of repeats).
-    """
-    flat_data = {}
-    
-    # 1. Flatten Plasticity (Already mostly flat vectors)
-    if 'plasticity' in computed_data:
-        for metric, subdict in computed_data['plasticity'].items():
-            for subkey, vector in subdict.items():
-                # subkey is like 'delta_task_000' or 'value_task_000'
-                # Clean up name: "Weight Mag Delta (T0)"
-                short_metric = metric.split(" ")[0] # 'Weight' from 'Weight Magnitude'
-                task_id = subkey.split("_")[-1] # '000'
-                type_id = subkey.split("_")[0] # 'delta' or 'value'
-                
-                key = f"Plast_{short_metric}_{type_id}_T{task_id}"
-                flat_data[key] = np.array(vector)
-
-    # 2. Flatten GLUE (Extracting key summaries)
-    if 'glue' in computed_data:
-        for metric, matrices in computed_data['glue'].items():
-            # relative: (N_Eval, N_Train, N_Repeats)
-            rel_mat = matrices['relative'] 
-            n_eval, n_train, _ = rel_mat.shape
-            
-            # Scenario A: Forgetting/Stability
-            # Look at Task 0 after Training Final Task
-            if n_train > 0:
-                final_train = n_train - 1
-                for e in range(n_eval):
-                    # Relative change of Task E after all training
-                    vec = rel_mat[e, final_train, :]
-                    key = f"Glue_{metric}_Rel_T{e}_End"
-                    flat_data[key] = np.array(vec)
-
-    # 3. Flatten CL (Updated Logic)
-    if 'cl' in computed_data:
-        cl = computed_data['cl']
-        
-        # --- Transfer (Task-Specific) ---
-        if 'transfer' in cl:
-            # Shape: (N_Tasks, N_Repeats)
-            trans = cl['transfer']
-            
-            if isinstance(trans, (np.ndarray, jnp.ndarray)):
-                if trans.ndim == 2:
-                    n_tasks_cl = trans.shape[0]
-                    # We create a metric entry for EACH task's transfer vector
-                    for t in range(n_tasks_cl):
-                        key = f"CL_Transfer_T{t}"
-                        flat_data[key] = np.array(trans[t, :])
-                elif trans.ndim == 1:
-                     flat_data['CL_Transfer_Avg'] = np.array(trans)
-
-        # --- Remembering (Pair-Specific Upper Triangle) ---
-        if 'remembering' in cl:
-            # Shape: (N_Eval_Tasks, N_Train_Tasks, N_Repeats)
-            rem = cl['remembering']
-            
-            if isinstance(rem, (np.ndarray, jnp.ndarray)) and rem.ndim == 3:
-                n_eval, n_train, _ = rem.shape
-                
-                for i in range(n_eval):
-                    for j in range(i + 1, n_train):
-                        # Extract the vector of repeats for this specific pair
-                        vec = rem[i, j, :]
-                        
-                        # Only add if it contains valid data (not all NaNs)
-                        if not np.all(np.isnan(vec)):
-                            key = f"CL_Rem_Eval{i}_Train{j}"
-                            flat_data[key] = np.array(vec)
-            
-        # --- Stats (optional global averages) ---
-        if 'stats' in cl and 'accuracy' in cl['stats']:
-            acc = cl['stats']['accuracy']
-            if isinstance(acc, (np.ndarray, jnp.ndarray)) and acc.ndim == 2:
-                 flat_data['CL_Avg_Accuracy'] = np.mean(acc, axis=1)
-
-    # --- 4. Weed out Constant Metrics ---
-    clean_data = {}
-    print("  [i] Validating metrics variance...")
-    
-    for key, val in flat_data.items():
-        if len(val) < 2:
-            continue
-            
-        # Calculate variance, ignoring NaNs
-        # If all NaNs, nanvar returns NaN (which we treat as invalid)
-        var = np.nanvar(val)
-        
-        if np.isnan(var) or var < 1e-12:
-            print(f"      [!] Removing constant/invalid metric: {key}")
-        else:
-            clean_data[key] = val
-
-    return clean_data
 
 
 def generate_correlation_plots(computed_data, experiment_path):
