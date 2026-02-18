@@ -111,6 +111,44 @@ def compute_metric_differences(experiment_path):
     else:
         print(f"  [ ] GLUE metrics file not found: {glue_path}")
 
+    # Helper for safe relative difference
+    # If flip_sign is True: We want Decrease to be Positive (Good) -> (v0 - v1)
+    # If flip_sign is False: We want Increase to be Positive (Good) -> (v1 - v0)
+    def calc_rel_diff(v0, v1, flip_sign=False):
+        denom = v1 + v0
+        # Add epsilon where denom is 0 to avoid NaNs
+        denom = np.where(denom == 0, 1e-9, denom)
+        
+        if flip_sign:
+            # "Lower is Better" (e.g. Dormant Units)
+            # If v1 < v0 (Decrease), num is positive -> GOOD
+            num = v0 - v1  
+        else:
+            # "Higher is Better" (e.g. Accuracy, Rank)
+            # If v1 > v0 (Increase), num is positive -> GOOD
+            num = v1 - v0
+            
+        return num / denom
+
+    # Configuration: Map raw keys to (CleanName, Flip_Bool)
+    # Flip_Bool = True means "Decrease is Good" (Positive output = metric went down)
+    PLASTICITY_CONFIG = {
+        # Lower is Better (Pathologies)
+        'dormant':          ('DormantUnits', True),  #  High dormancy = pathology
+        'weight_mag':       ('WeightMag', True),     # [cite: 332] High mag = saturation/loss of plasticity
+        'l2':               ('L2Norm', True),        # Similar to Weight Mag
+        
+        # Higher is Better (Health Signals)
+        'active':           ('ActiveUnits', False),  # [cite: 310] Active units maintain plasticity
+        'stable_rank':      ('StableRank', False),   # [cite: 317] Higher rank = better representation
+        'effective_rank':   ('EffectiveRank', False),# [cite: 323] Higher effective dim is better
+        'gradient_norm':    ('GradNorm', False),     # [cite: 365] Avoid vanishing gradients
+        'feature_norm':     ('FeatureNorm', False),  # [cite: 347] Avoid representation collapse
+        'variance':         ('FeatureVar', False),   # [cite: 357] Collapse in variance = forgetting
+        'entropy':          ('Entropy', False),      # [cite: 373] Low entropy = overconfident/rigid
+        'weight_diff':      ('WeightDiff', False),   # [cite: 338] Zero diff = no learning
+    }
+
     # --- 4. Process Plasticity (Relative Deltas) ---
     if os.path.exists(plast_path):
         try:
@@ -120,31 +158,48 @@ def compute_metric_differences(experiment_path):
             history = plast_data.get('history', {})
             samples_per_task = config.epochs_per_task // config.log_frequency
             
-            idx_end_t0 = samples_per_task - 1          # End of Task 0 (t0)
-            idx_end_t1 = (2 * samples_per_task) - 1    # End of Task 1 (t1)
+            idx_end_t0 = samples_per_task - 1          # End of Task 0
+            idx_end_t1 = (2 * samples_per_task) - 1    # End of Task 1
             
-            for metric, data in history.items():
+            for metric_raw, data in history.items():
                 if isinstance(data, list):
                     data = np.stack(data)
                 
-                # Ensure we have enough data to reach end of Task 1
+                # Determine clean name and direction from partial match
+                clean_name = None
+                should_flip = False
+                
+                # Simple string matching against config keys
+                metric_lower = metric_raw.lower()
+                for key_sub, (name, flip) in PLASTICITY_CONFIG.items():
+                    if key_sub in metric_lower:
+                        clean_name = name
+                        should_flip = flip
+                        break
+                
+                # Fallback if metric not in config (assume Higher is Better)
+                if clean_name is None:
+                    clean_name = metric_raw.replace(" ", "")
+                
+                # Construct final key: e.g., "DormantUnits_t1t0"
+                res_key = f"{clean_name}_t1t0"
+
                 if data.shape[0] > idx_end_t1:
                     val_t0 = data[idx_end_t0]   # End Task 0
                     val_t1 = data[idx_end_t1]   # End Task 1
                     
-                    # (t1 - t0) / (t1 + t0)
-                    rel_delta = calc_rel_diff(val_t0, val_t1)
+                    # Calculate Directional Relative Difference
+                    # Positive Result ALWAYS means "Improved Plasticity/Health"
+                    rel_delta = calc_rel_diff(val_t0, val_t1, flip_sign=should_flip)
                     
-                    results['plasticity'][metric] = rel_delta
+                    results['plasticity'][res_key] = rel_delta
                 else:
-                    print(f"  [!] Not enough steps in plasticity {metric}")
+                    print(f"  [!] Not enough steps in plasticity {metric_raw}")
 
             print(f"  [x] Processed Plasticity relative differences")
             
         except Exception as e:
             print(f"  [!] Error processing Plasticity metrics: {e}")
-    else:
-        print(f"  [ ] Plasticity metrics file not found: {plast_path}")
 
     return results
 
@@ -160,15 +215,15 @@ def _flatten_metrics(computed_data):
             # Clean up name: "Weight Mag Delta" -> "Plast_Weight"
             short_metric = metric.split(" ")[0] 
             # RelDiff indicates (t1-t0)/(t1+t0)
-            key = f"Plast_{short_metric}_RelDiff"
+            key = f"{short_metric}"
             flat_data[key] = np.array(vector)
 
     # 2. Flatten GLUE
     if 'glue' in computed_data:
         for metric, eval_dict in computed_data['glue'].items():
             for t_eval, vector in eval_dict.items():
-                # Key: Glue_{Metric}_EvalT{TaskID}_RelDiff
-                key = f"Glue_{metric}_EvalT{t_eval}_RelDiff"
+                # Key: Glue_{Metric}_EvalT{TaskID}
+                key = f"Glue_{metric}_EvalT{t_eval}"
                 flat_data[key] = np.array(vector)
 
     # 3. Flatten CL (Standard Processing)
