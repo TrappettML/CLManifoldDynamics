@@ -6,15 +6,7 @@ import matplotlib.pyplot as plt
 from scipy.stats import pearsonr
 import scipy.cluster.hierarchy as sch
 import scipy.spatial.distance as ssd
-
-import os
-import pickle
-import numpy as np
-import jax.numpy as jnp
-import matplotlib.pyplot as plt
-from scipy.stats import pearsonr
-import scipy.cluster.hierarchy as sch
-import scipy.spatial.distance as ssd
+from ipdb import set_trace
 
 def compute_metric_differences(experiment_path):
     """
@@ -66,20 +58,27 @@ def compute_metric_differences(experiment_path):
         except Exception as e:
             print(f"  [!] Error loading CL metrics: {e}")
 
-    # --- 3. Process GLUE Metrics ---
+   # --- 3. Process GLUE Metrics ---
     if os.path.exists(glue_path):
         try:
             with open(glue_path, 'rb') as f:
                 glue_data = pickle.load(f)
-            
-            # glue_data structure: {train_task: {eval_task: {metric: [steps, repeats]}}}
-            if 0 not in glue_data or 1 not in glue_data:
-                 print("  [!] GLUE data missing Task 0 or Task 1 data.")
+
+            # Define the keys for Task 0 and Task 1
+            key_t0 = 'task_000'
+            key_t1 = 'task_001'
+
+            # glue_data structure: keys: ['task_000', 'task_001'] (training) -> keys: ['task_000', 'task_001'] (evaluation)
+            if key_t0 not in glue_data or key_t1 not in glue_data:
+                 print(f"  [!] GLUE data missing {key_t0} or {key_t1} data.")
             else:
                 # Get list of eval tasks and metrics from the first training block
-                sample_train_block = glue_data[0]
+                sample_train_block = glue_data[key_t0]
                 eval_tasks = sorted(list(sample_train_block.keys()))
-                metric_names = list(sample_train_block[eval_tasks[0]].keys())
+                
+                # Grab metrics from the first available eval task
+                first_eval_task = eval_tasks[0]
+                metric_names = list(sample_train_block[first_eval_task].keys())
                 
                 for metric in metric_names:
                     results['glue'][metric] = {}
@@ -87,12 +86,14 @@ def compute_metric_differences(experiment_path):
                     for t_eval in eval_tasks:
                         try:
                             # 1. Get value at End of Task 0 (t0)
-                            series_t0 = glue_data[0][t_eval][metric]
+                            # Access via string key 'task_000'
+                            series_t0 = glue_data[key_t0][t_eval][metric]
                             if isinstance(series_t0, list): series_t0 = np.stack(series_t0)
                             val_t0 = series_t0[-1] 
                             
                             # 2. Get value at End of Task 1 (t1)
-                            series_t1 = glue_data[1][t_eval][metric]
+                            # Access via string key 'task_001'
+                            series_t1 = glue_data[key_t1][t_eval][metric]
                             if isinstance(series_t1, list): series_t1 = np.stack(series_t1)
                             val_t1 = series_t1[-1] 
                             
@@ -134,9 +135,9 @@ def compute_metric_differences(experiment_path):
     # Flip_Bool = True means "Decrease is Good" (Positive output = metric went down)
     PLASTICITY_CONFIG = {
         # Lower is Better (Pathologies)
-        'dormant':          ('DormantUnits', True),  #  High dormancy = pathology
-        'weight_mag':       ('WeightMag', True),     # [cite: 332] High mag = saturation/loss of plasticity
-        'l2':               ('L2Norm', True),        # Similar to Weight Mag
+        'dormant':          ('-DormantUnits', True),  #  High dormancy = pathology
+        'weight_mag':       ('-WeightMag', True),     # [cite: 332] High mag = saturation/loss of plasticity
+        'l2':               ('-L2Norm', True),        # Similar to Weight Mag
         
         # Higher is Better (Health Signals)
         'active':           ('ActiveUnits', False),  # [cite: 310] Active units maintain plasticity
