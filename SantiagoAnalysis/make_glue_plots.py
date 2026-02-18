@@ -25,6 +25,17 @@ region_label_map = {
     'Dor+Pos auditory area': 'Dor+Pos'
 }
 
+# Metric names for labeling
+glue_metrics = [
+    'capacity', 
+    'dimension', 
+    'radius', 
+    'center_align', 
+    'axis_align', 
+    'center_axis_align', 
+    'approx_capacity'
+]
+
 # Colors for the boxplots (one per region)
 colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
 
@@ -58,6 +69,7 @@ def load_and_pivot_data(filename):
     
     # Iterate through the raw dictionary to pivot
     for key, value_array in raw_means.items():
+    # for key, value_array in raw_sems.items():
         session, stim, region, period = key
         
         # Determine number of metrics (dimensions) from the first entry found
@@ -72,6 +84,7 @@ def load_and_pivot_data(filename):
             
         pivoted_means[pivot_key].append(value_array)
         
+    # print(f"Data loaded. Found {n_metrics} metric(s) across {len(raw_sems)} conditions.")
     print(f"Data loaded. Found {n_metrics} metric(s) across {len(raw_means)} conditions.")
     return pivoted_means, n_metrics
 
@@ -170,7 +183,20 @@ def main():
     
     # 2. Iterate over every metric found in the results
     for m in range(n_metrics):
-        print(f"\nGenerating plots for Metric {m}...")
+        
+        # Determine the name for the current metric index
+        if m < len(glue_metrics):
+            raw_name = glue_metrics[m]
+            # Format title nicely (e.g., "Center Axis Align" instead of "center_axis_align")
+            display_name = raw_name.replace('_', ' ').title()
+            # Filename safe version
+            file_name_slug = raw_name
+        else:
+            # Fallback if there are more metrics in data than in our list
+            display_name = f"Metric {m}"
+            file_name_slug = f"metric_{m}"
+
+        print(f"\nGenerating plots for {display_name}...")
         
         # 3. Iterate over every time period
         for period in periods:
@@ -182,8 +208,9 @@ def main():
                 stim_types, 
                 regions,
                 metric_index=m,
-                title=f'Metric {m} - {period.capitalize()} Period',
-                ylabel=f'Metric {m} Value',
+                # title=f'{display_name} SEMS - {period.capitalize()} Period',
+                title=f'{display_name} - {period.capitalize()} Period',
+                ylabel=f'{display_name}',
                 colors=colors,
                 region_label_map=region_label_map
             )
@@ -191,11 +218,10 @@ def main():
             plt.tight_layout()
             
             # Save figure
-            savename = f'figs/metric_{m}_summary_{period}.pdf'
+            savename = f'figs/{file_name_slug}_summary_{period}.pdf'
             plt.savefig(savename)
             print(f"Saved {savename}")
             plt.close()
-            # plt.show()
 
 if __name__ == "__main__":
     main()
