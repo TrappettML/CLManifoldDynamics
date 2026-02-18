@@ -4,6 +4,8 @@ import numpy as np
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from scipy.stats import pearsonr
+import scipy.cluster.hierarchy as sch
+import scipy.spatial.distance as ssd
 
 def compute_metric_differences(experiment_path):
     """
@@ -137,7 +139,7 @@ def compute_metric_differences(experiment_path):
                         
                         delta = val_final - val_initial
                         results['plasticity'][metric][f"delta_task_{t:03d}"] = delta
-                        results['plasticity'][metric][f"value_task_{t:03d}"] = val_final
+                        # results['plasticity'][metric][f"value_task_{t:03d}"] = val_final
 
             print(f"  [x] Processed Plasticity metrics")
             
@@ -298,10 +300,6 @@ def _flatten_metrics(computed_data):
             if isinstance(rem, (np.ndarray, jnp.ndarray)) and rem.ndim == 3:
                 n_eval, n_train, _ = rem.shape
                 
-                # We want the upper right diagonal: Train Task (j) > Eval Task (i)
-                # This represents how well we remember Task i after subsequently training on Task j
-                # e.g., if we train T0, then T1. We want to know how T0 is doing (i=0) after training T1 (j=1).
-                
                 for i in range(n_eval):
                     for j in range(i + 1, n_train):
                         # Extract the vector of repeats for this specific pair
@@ -318,7 +316,25 @@ def _flatten_metrics(computed_data):
             if isinstance(acc, (np.ndarray, jnp.ndarray)) and acc.ndim == 2:
                  flat_data['CL_Avg_Accuracy'] = np.mean(acc, axis=1)
 
-    return flat_data
+    # --- 4. Weed out Constant Metrics ---
+    clean_data = {}
+    print("  [i] Validating metrics variance...")
+    
+    for key, val in flat_data.items():
+        if len(val) < 2:
+            continue
+            
+        # Calculate variance, ignoring NaNs
+        # If all NaNs, nanvar returns NaN (which we treat as invalid)
+        var = np.nanvar(val)
+        
+        if np.isnan(var) or var < 1e-12:
+            print(f"      [!] Removing constant/invalid metric: {key}")
+        else:
+            clean_data[key] = val
+
+    return clean_data
+
 
 def generate_correlation_plots(computed_data, experiment_path):
     """
@@ -377,6 +393,30 @@ def generate_correlation_plots(computed_data, experiment_path):
             
             corr_matrix[i, j] = c
             p_matrix[i, j] = p
+
+    # --- Sort by Cluster Analysis (Best Practice) ---
+    # We use 1 - |r| as distance so that strong positive OR negative correlations 
+    # are grouped together.
+    try:
+        dissimilarity = 1 - np.abs(corr_matrix)
+        np.fill_diagonal(dissimilarity, 0) # Ensure 0 distance for self
+        
+        # Convert to condensed distance matrix for linkage
+        # Use 'ward' variance minimization algorithm
+        condensed_dist = ssd.squareform(dissimilarity, checks=False)
+        linkage_matrix = sch.linkage(condensed_dist, method='ward')
+        
+        # Get the new order of leaves
+        dendro = sch.dendrogram(linkage_matrix, no_plot=True)
+        new_order = dendro['leaves']
+        
+        # Reorder the matrix and the labels
+        corr_matrix = corr_matrix[new_order, :][:, new_order]
+        metric_names = [metric_names[i] for i in new_order]
+        
+        print(f"  [x] Reordered metrics via hierarchical clustering")
+    except Exception as e:
+        print(f"  [!] Clustering failed, keeping original alphabetic order: {e}")
 
     # 4. Generate Heatmap
     heatmap_path = os.path.join(corr_dir, "correlation_matrix.png")
