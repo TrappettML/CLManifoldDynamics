@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import argparse
-from tqdm import tqdm
+from tqdm import tqdm # type: ignore
 import os
 import pickle
 import jax
@@ -73,6 +73,18 @@ def run_glue_analysis_pipeline(config):
     
     # Initialize Solver
     qp = OSQP(tol=1e-4)
+
+    # --- Distributed Setup (JIT + Sharding) ---
+    # This automatically handles 1 or more GPUs by sharding the first axis (R)
+    devices = jax.devices()
+    sharding = jax.sharding.PositionalSharding(devices)
+    
+    @jax.jit
+    def distributed_glue(keys, data):
+        return jax.vmap(
+            partial(run_glue_solver, P=P, M=M, N=N, n_t=n_t, qp_solver=qp),
+            in_axes=(0, 0)
+        )(keys, data)
     
     # Create Vmapped Solver: (Key, Data) -> Metrics
     # Data shape: (R, P, M, H) -> Vmap over R (axis 0)
@@ -131,29 +143,41 @@ def run_glue_analysis_pipeline(config):
                 current_reps = reps_data[step, :, eval_task_idx, :, :]
                 
                 # Format Data: (R, P, M, H)
-                # We do this in Python to handle the masking logic easily
                 formatted_data = _prep_glue_batch(current_reps, current_eval_lbls, P, M, H)
                 
                 # Generate Keys for this batch
                 step_key = jax.random.fold_in(master_key, train_task_idx * 10000 + step)
                 batch_keys = jax.random.split(step_key, R)
                 
-                # Run GLUE (Vmapped over Repeats)
-                # returns: (metrics_tuple, plot_inputs, single_metrics)
-                metrics_tuple, _, _ = vmapped_glue(batch_keys, formatted_data)
+                # --- CHUNKING UPDATE ---
+                # CONFIG: Set this to 10 as requested (assuming ~30 repeats total -> 3 chunks)
+                REPEAT_CHUNK_SIZE = 10 
                 
-                # Store Metrics
-                # metrics_tuple index map: 0:cap, 1:dim, 2:rad, 3:cen_aln, 4:ax_aln, 5:cen_ax_aln, 6:app_cap
-                # Each item in tuple is shape (R,)
-                for i, name in enumerate(metric_names):
-                    # Convert JAX array to numpy and append
-                    full_results[train_task_name][eval_task_name][name].append(np.array(metrics_tuple[i]))
+                # Temporary storage to hold results from each chunk
+                # List of lists: [ [chunk1_metric1, chunk2_metric1], [chunk1_metric2...] ]
+                chunked_accumulators = [[] for _ in range(len(metric_names))]
 
-            # Convert lists to arrays: (Steps, Repeats)
-            for name in metric_names:
-                full_results[train_task_name][eval_task_name][name] = np.stack(
-                    full_results[train_task_name][eval_task_name][name]
-                )
+                # Iterate through the repeats (R) in chunks
+                for i in range(0, R, REPEAT_CHUNK_SIZE):
+                    # Slice the keys and data
+                    # JAX handles the last chunk automatically even if it's smaller than CHUNK_SIZE
+                    batch_keys_chunk = batch_keys[i : i + REPEAT_CHUNK_SIZE]
+                    data_chunk = formatted_data[i : i + REPEAT_CHUNK_SIZE]
+                    
+                    # Run GLUE on this specific chunk
+                    chunk_metrics_tuple, _, _ = vmapped_glue(batch_keys_chunk, data_chunk)
+                    
+                    # Collect the results
+                    for m_idx, metric_val in enumerate(chunk_metrics_tuple):
+                        chunked_accumulators[m_idx].append(metric_val)
+
+                # Reassemble chunks and store in full_results
+                for i, name in enumerate(metric_names):
+                    # Concatenate all chunks to restore shape (R,)
+                    full_metric_array = jnp.concatenate(chunked_accumulators[i], axis=0)
+                    
+                    # Convert to numpy and append to the main history
+                    full_results[train_task_name][eval_task_name][name].append(np.array(full_metric_array))
 
     # --- 4. Save Results ---
     save_path = os.path.join(config.results_dir, "glue_metrics.pkl")
