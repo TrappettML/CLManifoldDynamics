@@ -143,8 +143,6 @@ def compute_metric_differences(experiment_path):
             # plast_data['task_boundaries'] -> [step_idx_1, step_idx_2, ...]
             
             history = plast_data.get('history', {})
-            boundaries = plast_data.get('task_boundaries', [])
-            
             # We calculate deltas between task boundaries
             # i.e., Change in Plasticity Metric during Task X
             
@@ -155,28 +153,13 @@ def compute_metric_differences(experiment_path):
                 # data shape: (Total_Steps, Repeats)
                 results['plasticity'][metric] = {}
                 
-                # Pre-Task 0 Baseline (Step 0)
-                val_start = data[0]
-                
-                current_step = 0
-                prev_boundary_step = 0
-                
-                # The boundaries in plast_file are often stored as Epochs, not array indices
-                # We need to rely on the array shape and number of tasks usually.
-                # Assuming uniform log_freq
-                
-                if 'log_frequency' in config:
-                    log_freq = config.log_frequency
-                else:
-                    log_freq = 10 # Fallback
-                
                 # Calculate step indices from epochs or shape
-                steps_per_task = data.shape[0] // config.num_tasks
+                samples_per_task = config.epochs_per_task // config.log_frequency
                 
                 for t in range(config.num_tasks):
                     # Start and End indices for Task t
-                    idx_start = t * steps_per_task
-                    idx_end = (t + 1) * steps_per_task - 1
+                    idx_start = t * samples_per_task
+                    idx_end = (t + 1) * samples_per_task - 1
                     
                     if idx_end < data.shape[0]:
                         val_initial = data[idx_start]
@@ -198,6 +181,16 @@ def compute_metric_differences(experiment_path):
 
     print("--- Metrics Calculation Complete ---")
     return results
+
+def metric_x_metric_plot(metric1, metric2, correlation_val, title, xaxis_lbls, yaxis_lbls):
+    """For the two metrics, return a matplotlib plot
+      and the correlation value displayed as a floating value in the plot."""
+    pass
+
+def correlation_heatmap(correlations):
+    """Given the correlations between all the metrics across the repeats
+    Make a heatmap."""
+    pass
 
 def generate_correlation_plots(computed_data):
     """For each metric, caclulate the pearson correlation and then make plots.
