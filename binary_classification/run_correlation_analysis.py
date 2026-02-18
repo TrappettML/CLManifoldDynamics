@@ -1,6 +1,7 @@
 import os
 import pickle
 import numpy as np
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 from scipy.stats import pearsonr
 
@@ -52,6 +53,9 @@ def compute_metric_differences(experiment_path):
             
             # glue_data: {train_task: {eval_task: {metric: [steps, repeats]}}}
             train_tasks = sorted(list(glue_data.keys()))
+            if not train_tasks:
+                 raise ValueError("Glue data is empty")
+            
             eval_tasks = sorted(list(glue_data[train_tasks[0]].keys()))
             metric_names = list(glue_data[train_tasks[0]][eval_tasks[0]].keys())
             
@@ -189,7 +193,7 @@ def correlation_heatmap(correlations, labels, save_path):
     Given the correlations between all the metrics across the repeats, 
     make a heatmap using Matplotlib.
     """
-    fig, ax = plt.subplots(figsize=(12, 10))
+    fig, ax = plt.subplots(figsize=(14, 12))
     
     # Create Heatmap
     im = ax.imshow(correlations, cmap='coolwarm', vmin=-1, vmax=1)
@@ -211,17 +215,19 @@ def correlation_heatmap(correlations, labels, save_path):
 
     # Loop over data dimensions and create text annotations.
     # Use white text for dark backgrounds (high correlation) and black for light.
-    for i in range(len(labels)):
-        for j in range(len(labels)):
-            val = correlations[i, j]
-            if np.isnan(val):
-                text_val = "nan"
-                color = "black"
-            else:
-                text_val = f"{val:.2f}"
-                color = "white" if abs(val) > 0.5 else "black"
-                
-            ax.text(j, i, text_val, ha="center", va="center", color=color, fontsize=9)
+    # Note: If matrix is huge, we skip text to keep it readable
+    if len(labels) < 20:
+        for i in range(len(labels)):
+            for j in range(len(labels)):
+                val = correlations[i, j]
+                if np.isnan(val):
+                    text_val = "nan"
+                    color = "black"
+                else:
+                    text_val = f"{val:.2f}"
+                    color = "white" if abs(val) > 0.5 else "black"
+                    
+                ax.text(j, i, text_val, ha="center", va="center", color=color, fontsize=8)
 
     ax.set_title("Metric Correlation Matrix (Pearson R)", fontsize=14)
     plt.tight_layout()
@@ -246,7 +252,7 @@ def _flatten_metrics(computed_data):
                 type_id = subkey.split("_")[0] # 'delta' or 'value'
                 
                 key = f"Plast_{short_metric}_{type_id}_T{task_id}"
-                flat_data[key] = vector
+                flat_data[key] = np.array(vector)
 
     # 2. Flatten GLUE (Extracting key summaries)
     if 'glue' in computed_data:
@@ -263,37 +269,53 @@ def _flatten_metrics(computed_data):
                     # Relative change of Task E after all training
                     vec = rel_mat[e, final_train, :]
                     key = f"Glue_{metric}_Rel_T{e}_End"
-                    flat_data[key] = vec
+                    flat_data[key] = np.array(vec)
 
-    # 3. Flatten CL
+    # 3. Flatten CL (Updated Logic)
     if 'cl' in computed_data:
         cl = computed_data['cl']
         
-        # 'remembering' -> often a single scalar per repeat (Avg Remembering)
-        # or an array (Repeats, Tasks)
-        if 'remembering' in cl:
-            rem = cl['remembering']
-            if isinstance(rem, np.ndarray):
-                if rem.ndim == 1:
-                    flat_data['CL_Remembering'] = rem
-                elif rem.ndim == 2:
-                    # (Repeats, Tasks) -> Take mean
-                    flat_data['CL_Remembering_Avg'] = np.nanmean(rem, axis=1)
-
-        # 'transfer'
+        # --- Transfer (Task-Specific) ---
         if 'transfer' in cl:
+            # Shape: (N_Tasks, N_Repeats)
             trans = cl['transfer']
-            if isinstance(trans, np.ndarray):
-                if trans.ndim == 1:
-                    flat_data['CL_Transfer'] = trans
-                elif trans.ndim == 2:
-                    flat_data['CL_Transfer_Avg'] = np.nanmean(trans, axis=1)
-        
-        # 'stats' usually contains 'accuracy' -> (Repeats, Tasks)
+            
+            if isinstance(trans, (np.ndarray, jnp.ndarray)):
+                if trans.ndim == 2:
+                    n_tasks_cl = trans.shape[0]
+                    # We create a metric entry for EACH task's transfer vector
+                    for t in range(n_tasks_cl):
+                        key = f"CL_Transfer_T{t}"
+                        flat_data[key] = np.array(trans[t, :])
+                elif trans.ndim == 1:
+                     flat_data['CL_Transfer_Avg'] = np.array(trans)
+
+        # --- Remembering (Pair-Specific Upper Triangle) ---
+        if 'remembering' in cl:
+            # Shape: (N_Eval_Tasks, N_Train_Tasks, N_Repeats)
+            rem = cl['remembering']
+            
+            if isinstance(rem, (np.ndarray, jnp.ndarray)) and rem.ndim == 3:
+                n_eval, n_train, _ = rem.shape
+                
+                # We want the upper right diagonal: Train Task (j) > Eval Task (i)
+                # This represents how well we remember Task i after subsequently training on Task j
+                # e.g., if we train T0, then T1. We want to know how T0 is doing (i=0) after training T1 (j=1).
+                
+                for i in range(n_eval):
+                    for j in range(i + 1, n_train):
+                        # Extract the vector of repeats for this specific pair
+                        vec = rem[i, j, :]
+                        
+                        # Only add if it contains valid data (not all NaNs)
+                        if not np.all(np.isnan(vec)):
+                            key = f"CL_Rem_Eval{i}_Train{j}"
+                            flat_data[key] = np.array(vec)
+            
+        # --- Stats (optional global averages) ---
         if 'stats' in cl and 'accuracy' in cl['stats']:
             acc = cl['stats']['accuracy']
-            # Take final task accuracy or average accuracy
-            if acc.ndim == 2:
+            if isinstance(acc, (np.ndarray, jnp.ndarray)) and acc.ndim == 2:
                  flat_data['CL_Avg_Accuracy'] = np.mean(acc, axis=1)
 
     return flat_data
@@ -309,19 +331,18 @@ def generate_correlation_plots(computed_data, experiment_path):
     os.makedirs(corr_dir, exist_ok=True)
     
     # 2. Flatten Data
-    # We transform the complex nested structure into a flat dictionary: 
-    # {'Metric_Name': Array(Repeats), ...}
     flat_data = _flatten_metrics(computed_data)
     
     # Filter out metrics with 0 variance or all NaNs to prevent errors
     valid_data = {}
     for k, v in flat_data.items():
+        v = np.array(v)
         if np.any(np.isnan(v)):
             if np.sum(np.isnan(v)) > len(v) // 2:
-                print(f"Too many nans in {k}")
+                # print(f"  [Skipping] {k} (Too many NaNs)")
                 continue
         if np.var(v) < 1e-12:
-            print(f"  [Skipping] {k} (Zero Variance)") 
+            # print(f"  [Skipping] {k} (Zero Variance)") 
             continue
         valid_data[k] = v
         
@@ -349,7 +370,7 @@ def generate_correlation_plots(computed_data, experiment_path):
             
             # Handle potential NaNs pairwise
             mask = ~np.isnan(vec_i) & ~np.isnan(vec_j)
-            if np.sum(mask) < 2:
+            if np.sum(mask) < 3: # Need at least 3 points for meaningful correlation
                 c, p = 0, 1
             else:
                 c, p = pearsonr(vec_i[mask], vec_j[mask])
@@ -363,14 +384,14 @@ def generate_correlation_plots(computed_data, experiment_path):
     print(f"  [x] Saved Heatmap to {heatmap_path}")
 
     # 5. Generate Scatter Plots for Significant Correlations
-    # We only plot pairs with |R| > 0.5 and p < 0.05
+    # We only plot pairs with |R| > 0.6 and p < 0.05 to reduce noise
     count = 0
     for i in range(n_metrics):
         for j in range(i + 1, n_metrics):
             r_val = corr_matrix[i, j]
             p_val = p_matrix[i, j]
             
-            if abs(r_val) > 0.5 and p_val < 0.05:
+            if abs(r_val) > 0.6 and p_val < 0.05:
                 name_x = metric_names[i]
                 name_y = metric_names[j]
                 
@@ -382,6 +403,10 @@ def generate_correlation_plots(computed_data, experiment_path):
                 if type_x != type_y:
                     fname = f"corr_{name_x}_VS_{name_y}.png"
                     fname = fname.replace(" ", "").replace("(", "").replace(")", "")
+                    # shorten filename if too long
+                    if len(fname) > 255:
+                        fname = f"corr_{i}_VS_{j}.png"
+                        
                     save_path = os.path.join(corr_dir, fname)
                     
                     metric_x_metric_plot(
