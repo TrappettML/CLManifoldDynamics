@@ -5,9 +5,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import pearsonr
 
-def plot_scatter(experiment_path, metric_x, metric_y):
+def plot_scatter(experiment_path, metric_x, metric_y, use_mtl=False):
     # 1. Locate Data
-    data_path = os.path.join(experiment_path, "correlations", "correlation_data.pkl")
+    filename = "mtl_correlation_data.pkl" if use_mtl else "correlation_data.pkl"
+    data_path = os.path.join(experiment_path, "correlations", filename)
     save_dir = os.path.join(experiment_path, "correlations")
     
     if not os.path.exists(data_path):
@@ -60,8 +61,8 @@ def plot_scatter(experiment_path, metric_x, metric_y):
     plt.tight_layout()
 
     # 7. Save
-    # Create filename safe for OS
-    fname = f"scatter_{metric_x}_vs_{metric_y}.png"
+    prefix = "mtl_" if use_mtl else ""
+    fname = f"{prefix}scatter_{metric_x}_vs_{metric_y}.png"
     fname = fname.replace(" ", "").replace("(", "").replace(")", "").replace("/", "_")
     save_path = os.path.join(save_dir, fname)
     
@@ -75,10 +76,11 @@ if __name__ == "__main__":
     parser.add_argument("exp_path", type=str, help="Path to the experiment folder")
     parser.add_argument("metric_x", type=str, help="Key name for the X-axis metric")
     parser.add_argument("metric_y", type=str, help="Key name for the Y-axis metric")
+    parser.add_argument("--mtl", action="store_true", help="Use multi-task correlation data")
     
     args = parser.parse_args()
     
     if os.path.exists(args.exp_path):
-        plot_scatter(args.exp_path, args.metric_x, args.metric_y)
+        plot_scatter(args.exp_path, args.metric_x, args.metric_y, use_mtl=args.mtl)
     else:
         print(f"Experiment path not found: {args.exp_path}")

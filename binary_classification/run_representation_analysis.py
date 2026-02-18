@@ -10,6 +10,7 @@ import os
 import pickle
 import jax
 import jax.numpy as jnp
+from ipdb import set_trace
 
 from functools import partial
 from jaxopt import OSQP
@@ -54,14 +55,14 @@ def _prep_glue_batch(reps_batch, labels_batch, P, M, H):
     return jnp.array(formatted)
 
 def run_glue_analysis_pipeline(config):
-    print("\n--- Starting GLUE Metric Analysis (Distributed) ---")
+    print("\n--- Starting GLUE Metric Analysis (Distributed) ---", flush=True)
     
     # --- 1. Setup Distributed Environment ---
     devices = jax.devices()
     num_devices = len(devices)
-    print(f"Detected {num_devices} device(s): {[d.platform for d in devices]}")
-
-    # Create a Sharding spec that splits the first dimension (Batch) across devices
+    print(f"Detected {num_devices} device(s): {[d.platform for d in devices]}", flush=True)
+    set_trace()
+    
     # This replaces the need for explicit pmap
     sharding = jax.sharding.PositionalSharding(devices)
 
@@ -84,7 +85,7 @@ def run_glue_analysis_pipeline(config):
     # --- 2. JIT-Compiled Compute Step ---
     # We VMAP over the chunk. Because we pass in Sharded arrays, 
     # JAX automatically runs this in parallel across devices.
-    @jax.jit
+    @jax.pmap
     def distributed_glue_step(keys, data):
         return jax.vmap(
             partial(run_glue_solver, P=P, M=M, N=N, n_t=n_t, qp_solver=qp),
@@ -119,7 +120,7 @@ def run_glue_analysis_pipeline(config):
         # --- CHUNKING CONFIGURATION ---
         # 1. Determine items per GPU (e.g., 5 repeats per GPU per step)
         #    Adjust this if you hit OOM.
-        REPEATS_PER_DEVICE = 5 
+        REPEATS_PER_DEVICE = 5
         
         # 2. Total Chunk Size (Must be multiple of num_devices for efficiency)
         CHUNK_SIZE = REPEATS_PER_DEVICE * num_devices
@@ -154,35 +155,34 @@ def run_glue_analysis_pipeline(config):
                     
                     actual_batch_size = data_chunk.shape[0]
                     
-                    # 2. PADDING (Crucial for Robustness)
-                    # We pad to CHUNK_SIZE so the JIT function always sees the same shape.
-                    # This avoids recompilation for the last uneven batch and ensures 
-                    # the data divides evenly across devices.
+                    # 2. PADDING
+                    # Pad to ensure total size is a multiple of num_devices
                     pad_needed = CHUNK_SIZE - actual_batch_size
-                    
                     if pad_needed > 0:
-                        # Pad Keys (R,)
                         keys_padded = jnp.pad(batch_keys_chunk, ((0, pad_needed), (0,0)), constant_values=0)
-                        # Pad Data (R, P, M, H)
                         data_padded = jnp.pad(data_chunk, ((0, pad_needed), (0,0), (0,0), (0,0)), constant_values=0)
                     else:
                         keys_padded = batch_keys_chunk
                         data_padded = data_chunk
 
-                    # 3. DISTRIBUTE (Sharding)
-                    # Explicitly push data to devices according to our sharding spec
-                    keys_device = jax.device_put(keys_padded, sharding)
-                    data_device = jax.device_put(data_padded, sharding)
+                    # 3. RESHAPE FOR PMAP
+                    # Explicitly create the (num_devices, repeats_per_device) axes
+                    keys_pmap = keys_padded.reshape(num_devices, REPEATS_PER_DEVICE, *keys_padded.shape[1:])
+                    data_pmap = data_padded.reshape(num_devices, REPEATS_PER_DEVICE, *data_padded.shape[1:])
                     
-                    # 4. COMPUTE
-                    metrics_tuple, _, _ = distributed_glue_step(keys_device, data_device)
+                    # 4. COMPUTE (Strictly forced across all GPUs)
+                    metrics_tuple, _, _ = distributed_glue_step(keys_pmap, data_pmap)
                     
-                    # 5. UNPAD and COLLECT
+                    # 5. FLATTEN AND COLLECT
                     for m_idx, metric_val in enumerate(metrics_tuple):
-                        # Move back to host/numpy and slice off padding
-                        val_np = np.array(metric_val)
+                        # metric_val comes out as (num_devices, REPEATS_PER_DEVICE, ...)
+                        # We merge the first two axes back into a flat CHUNK_SIZE
+                        val_np = np.array(metric_val).reshape(CHUNK_SIZE, *metric_val.shape[2:])
+                        
+                        # Slice off any padding we added
                         if pad_needed > 0:
                             val_np = val_np[:actual_batch_size]
+                            
                         chunked_accumulators[m_idx].append(val_np)
 
                 # Reassemble chunks
