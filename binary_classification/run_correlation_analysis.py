@@ -36,7 +36,7 @@ def calc_rel_diff(v0, v1, flip_sign=False):
     else:
         num = v1 - v0
         
-    return num / denom
+    return num # / denom
 
 def get_metric_type_priority(metric_name):
     """Helper to group metrics: CL (0) -> GLUE (1) -> Plasticity (2)"""

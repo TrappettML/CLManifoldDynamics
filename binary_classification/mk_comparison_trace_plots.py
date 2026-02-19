@@ -22,13 +22,13 @@ plt.rcParams.update({
 
 def load_algorithm_data(base_path):
     """
-    Scans the base directory for algorithm subfolders, loading their 
-    aggregated time-series data from all_metrics.pkl (or fallback files).
+    Scans the base directory for algorithm subfolders. Explicitly loads 
+    performance time-series data from global_history.pkl (or all_metrics.pkl), 
+    and manifold/plasticity data from their respective files.
     """
     data_by_algo = {}
     config = None
     
-    # Iterate through immediate subdirectories (Algorithms like RL, SL)
     for entry in os.listdir(base_path):
         algo_dir = os.path.join(base_path, entry)
         if not os.path.isdir(algo_dir):
@@ -36,23 +36,33 @@ def load_algorithm_data(base_path):
             
         metrics_file = os.path.join(algo_dir, "all_metrics.pkl")
         config_file = os.path.join(algo_dir, "config.pkl")
+        gh_file = os.path.join(algo_dir, "global_history.pkl")
         
-        algo_data = {'cl': {}, 'plasticity': {}, 'glue': {}}
+        algo_data = {'performance': {}, 'plasticity': {}, 'glue': {}}
         loaded_any = False
 
-        # Attempt to load the unified master object
+        # Grab experiment configurations first so we have n_repeats for reshaping
+        if config is None and os.path.exists(config_file):
+            with open(config_file, 'rb') as f:
+                config = pickle.load(f)
+
+        # 1. Load Performance Data (Prioritize global_history.pkl, fallback to all_metrics['cl'])
+        if os.path.exists(gh_file):
+            with open(gh_file, 'rb') as f:
+                algo_data['performance'] = pickle.load(f)
+            loaded_any = True
+            
+        # 2. Load Unified Master Object (if exists)
         if os.path.exists(metrics_file):
             with open(metrics_file, 'rb') as f:
-                algo_data = pickle.load(f)
-                loaded_any = True
+                master_data = pickle.load(f)
+                if not algo_data['performance']:
+                    algo_data['performance'] = master_data.get('cl', {})
+                algo_data['plasticity'] = master_data.get('plasticity', {})
+                algo_data['glue'] = master_data.get('glue', {})
+            loaded_any = True
         else:
-            # Fallback to individual metric files if the unified object is missing
-            gh_file = os.path.join(algo_dir, "global_history.pkl")
-            if os.path.exists(gh_file):
-                with open(gh_file, 'rb') as f:
-                    algo_data['cl'] = pickle.load(f)
-                loaded_any = True
-                
+            # Fallback for individual metric files
             import glob
             plast_files = glob.glob(os.path.join(algo_dir, "plastic_analysis_*.pkl"))
             if plast_files:
@@ -69,49 +79,49 @@ def load_algorithm_data(base_path):
         if loaded_any:
             data_by_algo[entry] = algo_data
             print(f"Loaded metric data for algorithm: {entry}")
-            
-            # Grab experiment configurations (epochs, log freq) from the first valid algorithm
-            if config is None and os.path.exists(config_file):
-                with open(config_file, 'rb') as f:
-                    config = pickle.load(f)
         else:
-            print(f"Skipping {entry}: No metric files found. (Run run_representation_analysis.py first)")
+            print(f"Skipping {entry}: No metric files found.")
             
     return data_by_algo, config
 
-def extract_cl_data(data_by_algo):
-    """Calculates Average Accuracy and Average Loss across all evaluated tasks."""
-    cl_extracted = {}
+def extract_performance_data(data_by_algo, config):
+    """
+    Extracts task-specific Accuracy and Loss for performance comparison plots.
+    Reshapes the traces using config.n_repeats exactly like single_run.py.
+    """
+    acc_extracted = {}
+    loss_extracted = {}
+    
+    # Fallback to 1 repeat if config is missing to prevent crashes
+    repeats = getattr(config, 'n_repeats', 1)
+    
     for algo, data in data_by_algo.items():
-        cl_data = data.get('cl', {})
-        if not cl_data or 'test_metrics' not in cl_data:
+        perf_data = data.get('performance', {})
+        if not perf_data or 'test_metrics' not in perf_data:
             continue
         
-        tasks = sorted(list(cl_data['test_metrics'].keys()))
-        if not tasks: continue
+        acc_extracted[algo] = {}
+        loss_extracted[algo] = {}
         
-        acc_arrays, loss_arrays = [], []
+        tasks = sorted(list(perf_data['test_metrics'].keys()))
         for t in tasks:
-            acc = np.array(cl_data['test_metrics'][t]['acc'])
-            loss = np.array(cl_data['test_metrics'][t]['loss'])
+            acc = np.array(perf_data['test_metrics'][t]['acc'])
+            loss = np.array(perf_data['test_metrics'][t]['loss'])
             
-            if acc.ndim == 1: acc = acc.reshape(-1, 1)
-            if loss.ndim == 1: loss = loss.reshape(-1, 1)
+            # Reshape flattened arrays using n_repeats just like single_run.py
+            if acc.ndim == 1: 
+                acc = acc.reshape(-1, repeats)
+            if loss.ndim == 1: 
+                loss = loss.reshape(-1, repeats)
             
-            acc_arrays.append(acc)
-            loss_arrays.append(loss)
+            # Clean task name for the subplot titles (e.g., 'task_000' -> 'Task 0')
+            clean_name = t.replace('_', ' ').replace('00', '').title()
             
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            # Averages test values across all tasks
-            avg_acc = np.nanmean(np.stack(acc_arrays, axis=0), axis=0) # Shape: (Epochs, Repeats)
-            avg_loss = np.nanmean(np.stack(loss_arrays, axis=0), axis=0)
-        
-        cl_extracted[algo] = {
-            'Average Test Accuracy': avg_acc,
-            'Average Test Loss': avg_loss
-        }
-    return cl_extracted
+            acc_extracted[algo][clean_name] = acc
+            loss_extracted[algo][clean_name] = loss
+            
+    return acc_extracted, loss_extracted
+
 
 def extract_plasticity_data(data_by_algo):
     """Directly extracts the tracked network plasticity traces."""
@@ -307,7 +317,7 @@ def main():
     
     # Process Metrics
     print("\nExtracting and formatting metric data...")
-    cl_data = extract_cl_data(data_by_algo)
+    acc_data, loss_data = extract_performance_data(data_by_algo, config)
     glue_data = extract_glue_data(data_by_algo)
     plasticity_data = extract_plasticity_data(data_by_algo)
     
@@ -315,9 +325,16 @@ def main():
     print("\nGenerating Time-Series Plots...")
     
     plot_timeseries_grid(
-        cl_data, 
-        category_name="Continual Learning Performance", 
-        save_path=os.path.join(output_dir, "cl_timeseries_comparison.png"),
+        acc_data, 
+        category_name="Performance (Accuracy)", 
+        save_path=os.path.join(output_dir, "performance_comparison_plots_accuracy.png"),
+        config=config
+    )
+    
+    plot_timeseries_grid(
+        loss_data, 
+        category_name="Performance (Loss)", 
+        save_path=os.path.join(output_dir, "performance_comparison_plots_loss.png"),
         config=config
     )
     
