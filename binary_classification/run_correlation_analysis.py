@@ -359,7 +359,7 @@ def run_analysis(experiment_path):
 
 
 if __name__ == "__main__":
-    EXP_PATH = "/home/users/MTrappett/manifold/binary_classification/results/mnist/RL/"
+    EXP_PATH = "/home/users/MTrappett/manifold/binary_classification/results/mnist/SL/"
     
     if os.path.exists(EXP_PATH):
         run_analysis(EXP_PATH)

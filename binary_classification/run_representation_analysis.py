@@ -85,7 +85,7 @@ def run_glue_analysis_pipeline(config):
     master_key = jax.random.PRNGKey(config.seed)
     
     # Set a safe batch size for repeats to avoid OOM
-    repeats_batch_size = getattr(config, 'glue_batch_size', 10)
+    repeats_batch_size = getattr(config, 'glue_batch_size', 5)
 
     # --- 2. Process Training Tasks ---
     for train_task_idx in range(config.num_tasks):
@@ -153,19 +153,11 @@ def run_glue_analysis_pipeline(config):
                     axis=0
                 )
             
-            # ---> FORCE MEMORY CLEANUP <---
-            jax.clear_caches()
-            gc.collect()
+            # # ---> FORCE MEMORY CLEANUP <---
+            # jax.clear_caches()
+            # gc.collect()
 
     # --- 3. Save Results ---
-    save_path = os.path.join(config.results_dir, "glue_metrics.pkl")
-    with open(save_path, 'wb') as f:
-        pickle.dump(full_results, f)
-    print(f"GLUE metrics saved to {save_path}")
-
-    # Plot
-
-    # --- 4. Save Results ---
     save_path = os.path.join(config.results_dir, "glue_metrics.pkl")
     with open(save_path, 'wb') as f:
         pickle.dump(full_results, f)
@@ -605,5 +597,5 @@ def run_all_representation_analysis(experiment_path):
 
 
 if __name__=='__main__':
-    experiment_path = "/home/users/MTrappett/manifold/binary_classification/results/mnist/SL/"
+    experiment_path = "/home/users/MTrappett/manifold/binary_classification/results/mnist/RL/"
     run_all_representation_analysis(experiment_path)
