@@ -284,8 +284,12 @@ def generate_correlation_artifacts(flat_data, corr_dir, prefix=""):
     valid_data = {}
     for k, v in flat_data.items():
         v = np.array(v)
-        if np.any(np.isnan(v)) and np.sum(np.isnan(v)) > len(v) // 2: continue
-        if np.var(v) < 1e-12: continue
+        if np.any(np.isnan(v)) and np.sum(np.isnan(v)) > len(v) // 2: 
+            print(f"Too many nans key: {k}")
+            continue
+        if np.var(v) < 1e-12: 
+            print(f"Value is constant for: {k}")
+            continue
         valid_data[k] = v
         
     metric_names = sorted(list(valid_data.keys()))

@@ -82,15 +82,20 @@ def run_glue_analysis_pipeline(config):
     # Initialize Solver
     qp = OSQP(tol=1e-4)
 
-    # --- 2. JIT-Compiled Compute Step ---
-    # We VMAP over the chunk. Because we pass in Sharded arrays, 
-    # JAX automatically runs this in parallel across devices.
+    # --- 2. JIT-Compiled Compute Steps ---
+    # For the exact multiples across GPUs
     @jax.pmap
     def distributed_glue_step(keys, data):
         return jax.vmap(
             partial(run_glue_solver, P=P, M=M, N=N, n_t=n_t, qp_solver=qp),
             in_axes=(0, 0)
         )(keys, data)
+        
+    # For the leftover remainder on a single device
+    vmapped_glue_step = jax.jit(jax.vmap(
+        partial(run_glue_solver, P=P, M=M, N=N, n_t=n_t, qp_solver=qp),
+        in_axes=(0, 0)
+    ))
     
     # Main Results Storage
     full_results = {}
@@ -120,7 +125,7 @@ def run_glue_analysis_pipeline(config):
         # --- CHUNKING CONFIGURATION ---
         # 1. Determine items per GPU (e.g., 5 repeats per GPU per step)
         #    Adjust this if you hit OOM.
-        REPEATS_PER_DEVICE = 5
+        REPEATS_PER_DEVICE = 7
         
         # 2. Total Chunk Size (Must be multiple of num_devices for efficiency)
         CHUNK_SIZE = REPEATS_PER_DEVICE * num_devices
@@ -138,56 +143,47 @@ def run_glue_analysis_pipeline(config):
             # Iterate Time Steps
             for step in tqdm(range(L), desc=f"  {eval_task_name}", leave=False):
                 current_reps = reps_data[step, :, eval_task_idx, :, :] # (R, S, H)
-                formatted_data = _prep_glue_batch(current_reps, current_eval_lbls, P, M, H) # (R, P, M, H)
+                formatted_data = _prep_glue_batch(current_reps, current_eval_lbls, P, M, H) 
                 
                 # Keys
                 step_key = jax.random.fold_in(master_key, train_task_idx * 10000 + step)
                 batch_keys = jax.random.split(step_key, R)
                 
-                # Helper to collect results from chunks
-                chunked_accumulators = [[] for _ in range(len(metric_names))]
+                # Calculate exactly how many items fit evenly across devices
+                items_per_device = R // num_devices
+                pmap_total = items_per_device * num_devices
+                remainder = R % num_devices
+                
+                # Temporary storage for this specific time step
+                step_results = [[] for _ in range(len(metric_names))]
 
-                # --- PROCESS IN CHUNKS ---
-                for i in range(0, R, CHUNK_SIZE):
-                    # 1. Slice
-                    batch_keys_chunk = batch_keys[i : i + CHUNK_SIZE]
-                    data_chunk = formatted_data[i : i + CHUNK_SIZE]
+                # --- 1. PMAP the Even Chunks ---
+                if pmap_total > 0:
+                    data_pmap = formatted_data[:pmap_total].reshape(num_devices, items_per_device, *formatted_data.shape[1:])
+                    keys_pmap = batch_keys[:pmap_total].reshape(num_devices, items_per_device, *batch_keys.shape[1:])
                     
-                    actual_batch_size = data_chunk.shape[0]
+                    metrics_tuple_pmap, _, _ = distributed_glue_step(keys_pmap, data_pmap)
                     
-                    # 2. PADDING
-                    # Pad to ensure total size is a multiple of num_devices
-                    pad_needed = CHUNK_SIZE - actual_batch_size
-                    if pad_needed > 0:
-                        keys_padded = jnp.pad(batch_keys_chunk, ((0, pad_needed), (0,0)), constant_values=0)
-                        data_padded = jnp.pad(data_chunk, ((0, pad_needed), (0,0), (0,0), (0,0)), constant_values=0)
-                    else:
-                        keys_padded = batch_keys_chunk
-                        data_padded = data_chunk
+                    for i, name in enumerate(metric_names):
+                        # Reshape back to flat (pmap_total, ...)
+                        val_np = np.array(metrics_tuple_pmap[i]).reshape(pmap_total, *metrics_tuple_pmap[i].shape[2:])
+                        step_results[i].append(val_np)
 
-                    # 3. RESHAPE FOR PMAP
-                    # Explicitly create the (num_devices, repeats_per_device) axes
-                    keys_pmap = keys_padded.reshape(num_devices, REPEATS_PER_DEVICE, *keys_padded.shape[1:])
-                    data_pmap = data_padded.reshape(num_devices, REPEATS_PER_DEVICE, *data_padded.shape[1:])
+                # --- 2. VMAP the Leftovers ---
+                if remainder > 0:
+                    data_vmap = formatted_data[pmap_total:]
+                    keys_vmap = batch_keys[pmap_total:]
                     
-                    # 4. COMPUTE (Strictly forced across all GPUs)
-                    metrics_tuple, _, _ = distributed_glue_step(keys_pmap, data_pmap)
+                    metrics_tuple_vmap, _, _ = vmapped_glue_step(keys_vmap, data_vmap)
                     
-                    # 5. FLATTEN AND COLLECT
-                    for m_idx, metric_val in enumerate(metrics_tuple):
-                        # metric_val comes out as (num_devices, REPEATS_PER_DEVICE, ...)
-                        # We merge the first two axes back into a flat CHUNK_SIZE
-                        val_np = np.array(metric_val).reshape(CHUNK_SIZE, *metric_val.shape[2:])
-                        
-                        # Slice off any padding we added
-                        if pad_needed > 0:
-                            val_np = val_np[:actual_batch_size]
-                            
-                        chunked_accumulators[m_idx].append(val_np)
+                    for i, name in enumerate(metric_names):
+                        val_np = np.array(metrics_tuple_vmap[i])
+                        step_results[i].append(val_np)
 
-                # Reassemble chunks
+                # --- 3. Concatenate and Store ---
                 for i, name in enumerate(metric_names):
-                    full_metric_array = np.concatenate(chunked_accumulators[i], axis=0)
+                    # Combine the pmap and vmap results back into a single array of length R
+                    full_metric_array = np.concatenate(step_results[i], axis=0)
                     full_results[train_task_name][eval_task_name][name].append(full_metric_array)
 
             # --- CRITICAL FIX: STACK LISTS INTO ARRAYS ---
