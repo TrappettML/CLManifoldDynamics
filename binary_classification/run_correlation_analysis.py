@@ -38,6 +38,19 @@ def calc_rel_diff(v0, v1, flip_sign=False):
         
     return num / denom
 
+def get_metric_type_priority(metric_name):
+    """Helper to group metrics: CL (0) -> GLUE (1) -> Plasticity (2)"""
+    name_lower = metric_name.lower()
+    # 1. Continual Learning metrics
+    if name_lower.startswith('cl_') or 'acc' in name_lower:
+        return (0, metric_name)
+    # 2. GLUE metrics
+    elif 'glue' in name_lower:
+        return (1, metric_name)
+    # 3. Plasticity metrics (everything else)
+    else:
+        return (2, metric_name)
+    
 def compute_metric_differences(experiment_path):
     print(f"--- Processing Metrics for: {experiment_path} ---")
 
@@ -280,7 +293,7 @@ def correlation_heatmap(correlations, labels, save_path):
     plt.savefig(save_path, dpi=150)
     plt.close()
 
-def generate_correlation_artifacts(flat_data, corr_dir, prefix=""):
+def generate_correlation_artifacts(flat_data, corr_dir, prefix="", order_method="hierarchical"):
     valid_data = {}
     for k, v in flat_data.items():
         v = np.array(v)
@@ -292,7 +305,13 @@ def generate_correlation_artifacts(flat_data, corr_dir, prefix=""):
             continue
         valid_data[k] = v
         
-    metric_names = sorted(list(valid_data.keys()))
+    # --- 1. Initial Sorting ---
+    if order_method == "metric_type":
+        metric_names = sorted(list(valid_data.keys()), key=get_metric_type_priority)
+    else:
+        # Base alphabetical sort for both 'alphabetical' and 'hierarchical'
+        metric_names = sorted(list(valid_data.keys()))
+        
     n_metrics = len(metric_names)
     
     if n_metrics < 2:
@@ -304,7 +323,6 @@ def generate_correlation_artifacts(flat_data, corr_dir, prefix=""):
     with open(data_path, 'wb') as f:
         pickle.dump(valid_data, f)
     print(f"  [x] Saved correlation data dict to {data_path}")
-    print(f"      Keys available: {metric_names}")
 
     print(f"  [i] Computing heatmap for {n_metrics} metrics...")
     corr_matrix = np.zeros((n_metrics, n_metrics))
@@ -323,45 +341,77 @@ def generate_correlation_artifacts(flat_data, corr_dir, prefix=""):
             else:
                 corr_matrix[i, j], _ = pearsonr(vec_i[mask], vec_j[mask])
 
-    try:
-        dissimilarity = 1 - np.abs(corr_matrix)
-        np.fill_diagonal(dissimilarity, 0)
-        condensed_dist = ssd.squareform(dissimilarity, checks=False)
-        linkage_matrix = sch.linkage(condensed_dist, method='ward')
-        dendro = sch.dendrogram(linkage_matrix, no_plot=True)
-        new_order = dendro['leaves']
-        
-        corr_matrix = corr_matrix[new_order, :][:, new_order]
-        metric_names = [metric_names[i] for i in new_order]
-        print(f"  [x] Reordered metrics via hierarchical clustering")
-    except Exception as e:
-        print(f"  [!] Clustering failed, keeping original order: {e}")
+    # --- 2. Hierarchical Re-sorting (if requested) ---
+    if order_method == "hierarchical":
+        try:
+            dissimilarity = 1 - np.abs(corr_matrix)
+            np.fill_diagonal(dissimilarity, 0)
+            condensed_dist = ssd.squareform(dissimilarity, checks=False)
+            linkage_matrix = sch.linkage(condensed_dist, method='ward')
+            dendro = sch.dendrogram(linkage_matrix, no_plot=True)
+            new_order = dendro['leaves']
+            
+            corr_matrix = corr_matrix[new_order, :][:, new_order]
+            metric_names = [metric_names[i] for i in new_order]
+            print(f"  [x] Reordered metrics via hierarchical clustering")
+        except Exception as e:
+            print(f"  [!] Clustering failed, keeping original order: {e}")
+    elif order_method == "metric_type":
+        print(f"  [x] Ordered metrics by type (CL -> GLUE -> Plasticity)")
+    elif order_method == "alphabetical":
+        print(f"  [x] Ordered metrics alphabetically")
 
-    heatmap_filename = f"{prefix}correlation_matrix.png"
+    heatmap_filename = f"{prefix}correlation_matrix_{order_method}.png" # Updated to save different versions uniquely
     heatmap_path = os.path.join(corr_dir, heatmap_filename)
     correlation_heatmap(corr_matrix, metric_names, heatmap_path)
     print(f"  [x] Saved Heatmap to {heatmap_path}")
+    return metric_names
 
-def run_analysis(experiment_path):
-    print("--- Generating Correlation Analysis ---")
+
+def run_analysis(experiment_path, order_method="metric_type"):
+    print(f"--- Generating Correlation Analysis (Order: {order_method}) ---")
     corr_dir = os.path.join(experiment_path, "correlations")
     os.makedirs(corr_dir, exist_ok=True)
     
     # 1. Continual Learning Analysis
     computed_data = compute_metric_differences(experiment_path)
     flat_data = _flatten_metrics(computed_data)
-    generate_correlation_artifacts(flat_data, corr_dir, prefix="")
+    normal_keys = generate_correlation_artifacts(flat_data, corr_dir, prefix="", order_method=order_method)
 
     # 2. Multi-Task Analysis
     mtl_flat_data = compute_mtl_differences(experiment_path)
+    mtl_keys = None
     if mtl_flat_data:
-        generate_correlation_artifacts(mtl_flat_data, corr_dir, prefix="mtl_")
+        mtl_keys = generate_correlation_artifacts(mtl_flat_data, corr_dir, prefix="mtl_", order_method=order_method)
+
+    # 3. Save all valid keys to a single text file
+    keys_txt_path = os.path.join(corr_dir, "available_keys.txt")
+    with open(keys_txt_path, "w") as f:
+        f.write("--- Normal (Continual Learning) Keys ---\n")
+        if normal_keys:
+            for key in normal_keys:
+                f.write(f"{key}\n")
+        else:
+            f.write("None\n")
+            
+        f.write("\n--- Multi-Task (MTL) Keys ---\n")
+        if mtl_keys:
+            for key in mtl_keys:
+                f.write(f"{key}\n")
+        else:
+            f.write("None\n")
+            
+    print(f"  [x] Saved all available keys to {keys_txt_path}")
 
 
 if __name__ == "__main__":
     EXP_PATH = "/home/users/MTrappett/manifold/binary_classification/results/mnist/SL/"
     
     if os.path.exists(EXP_PATH):
-        run_analysis(EXP_PATH)
+        run_analysis(EXP_PATH, order_method="metric_type")
+        
+        # Or generate all three variations to compare:
+        # for method in ["alphabetical", "metric_type", "hierarchical"]:
+        #     run_analysis(EXP_PATH, order_method=method)
     else:
         print(f"Experiment path not found: {EXP_PATH}")
