@@ -56,17 +56,8 @@ def _prep_glue_batch(reps_batch, labels_batch, P, M, H):
     return formatted
 
 def run_glue_analysis_pipeline(config):
-    print("\n--- Starting GLUE Metric Analysis (Distributed) ---", flush=True)
+    print("\n--- Starting GLUE Metric Analysis (Batched VMAP) ---", flush=True)
     
-    # --- 1. Setup Distributed Environment ---
-    devices = jax.devices()
-    num_devices = len(devices)
-    print(f"Detected {num_devices} device(s): {[d.platform for d in devices]}", flush=True)
-    # set_trace()
-    
-    # This replaces the need for explicit pmap
-    # sharding = jax.sharding.PositionalSharding(devices)
-
     # Metrics map 
     metric_names = [
         'Capacity', 'Dimension', 'Radius', 
@@ -83,16 +74,7 @@ def run_glue_analysis_pipeline(config):
     # Initialize Solver
     qp = OSQP(tol=1e-4)
 
-    # --- 2. JIT-Compiled Compute Steps ---
-    # For the exact multiples across GPUs
-    @jax.pmap
-    def distributed_glue_step(keys, data):
-        return jax.vmap(
-            partial(run_glue_solver, P=P, M=M, N=N, n_t=n_t, qp_solver=qp),
-            in_axes=(0, 0)
-        )(keys, data)
-        
-    # For the leftover remainder on a single device
+    # --- 1. JIT-Compiled Compute Step ---
     vmapped_glue_step = jax.jit(jax.vmap(
         partial(run_glue_solver, P=P, M=M, N=N, n_t=n_t, qp_solver=qp),
         in_axes=(0, 0)
@@ -101,8 +83,11 @@ def run_glue_analysis_pipeline(config):
     # Main Results Storage
     full_results = {}
     master_key = jax.random.PRNGKey(config.seed)
+    
+    # Set a safe batch size for repeats to avoid OOM
+    repeats_batch_size = getattr(config, 'glue_batch_size', 10)
 
-    # --- 3. Process Training Tasks ---
+    # --- 2. Process Training Tasks ---
     for train_task_idx in range(config.num_tasks):
         train_task_name = f"task_{train_task_idx:03d}"
         task_dir = os.path.join(config.results_dir, train_task_name)
@@ -140,57 +125,45 @@ def run_glue_analysis_pipeline(config):
                 step_key = jax.random.fold_in(master_key, train_task_idx * 10000 + step)
                 batch_keys = jax.random.split(step_key, R)
                 
-                # Calculate exactly how many items fit evenly across devices
-                items_per_device = R // num_devices
-                pmap_total = items_per_device * num_devices
-                remainder = R % num_devices
-                
                 # Temporary storage for this specific time step
                 step_results = [[] for _ in range(len(metric_names))]
 
-                # --- 1. PMAP the Even Chunks ---
-                if pmap_total > 0:
-                    data_pmap = formatted_data[:pmap_total].reshape(num_devices, items_per_device, *formatted_data.shape[1:])
-                    keys_pmap = batch_keys[:pmap_total].reshape(num_devices, items_per_device, *batch_keys.shape[1:])
+                # --- Batched VMAP execution ---
+                for b_start in range(0, R, repeats_batch_size):
+                    b_end = min(b_start + repeats_batch_size, R)
+                    batch_data = formatted_data[b_start:b_end]
+                    batch_keys_chunk = batch_keys[b_start:b_end]
                     
-                    metrics_tuple_pmap, _, _ = distributed_glue_step(keys_pmap, data_pmap)
-
-                    jax.block_until_ready(metrics_tuple_pmap)
-                    
-                    for i, name in enumerate(metric_names):
-                        # Reshape back to flat (pmap_total, ...)
-                        val_np = np.array(metrics_tuple_pmap[i]).reshape(pmap_total, *metrics_tuple_pmap[i].shape[2:])
-                        step_results[i].append(val_np)
-
-                # --- 2. VMAP the Leftovers ---
-                if remainder > 0:
-                    data_vmap = formatted_data[pmap_total:]
-                    keys_vmap = batch_keys[pmap_total:]
-                    
-                    metrics_tuple_vmap, _, _ = vmapped_glue_step(keys_vmap, data_vmap)
+                    metrics_tuple_vmap, _, _ = vmapped_glue_step(batch_keys_chunk, batch_data)
                     
                     for i, name in enumerate(metric_names):
-                        val_np = np.array(metrics_tuple_vmap[i])
-                        step_results[i].append(val_np)
+                        step_results[i].append(np.array(metrics_tuple_vmap[i]))
 
-                # --- 3. Concatenate and Store ---
+                # --- Concatenate and Store ---
                 for i, name in enumerate(metric_names):
-                    # Combine the pmap and vmap results back into a single array of length R
+                    # Combine the chunked results back into a single array of length R
                     full_metric_array = np.concatenate(step_results[i], axis=0)
                     full_results[train_task_name][eval_task_name][name].append(full_metric_array)
+                    
             # --- CRITICAL: STACK LISTS INTO ARRAYS ---
             # The plotting function expects (Steps, Repeats) arrays, not lists.
-            # We do this once per task, after all time steps are collected.
             for name in metric_names:
-                # Convert List of (R,) arrays -> Single (L, R) array
                 full_results[train_task_name][eval_task_name][name] = np.stack(
                     full_results[train_task_name][eval_task_name][name], 
                     axis=0
                 )
+            
             # ---> FORCE MEMORY CLEANUP <---
-            # Tell JAX to clear any orphaned compiled buffers and force Python to garbage collect
             jax.clear_caches()
             gc.collect()
+
+    # --- 3. Save Results ---
+    save_path = os.path.join(config.results_dir, "glue_metrics.pkl")
+    with open(save_path, 'wb') as f:
+        pickle.dump(full_results, f)
+    print(f"GLUE metrics saved to {save_path}")
+
+    # Plot
 
     # --- 4. Save Results ---
     save_path = os.path.join(config.results_dir, "glue_metrics.pkl")
