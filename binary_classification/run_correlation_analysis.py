@@ -293,9 +293,15 @@ def correlation_heatmap(correlations, labels, save_path):
     plt.savefig(save_path, dpi=150)
     plt.close()
 
-def generate_correlation_artifacts(flat_data, corr_dir, prefix="", order_method="hierarchical"):
+def generate_correlation_artifacts(flat_data, corr_dir, prefix="", order_method="hierarchical", exclude_plasticity=False):
     valid_data = {}
     for k, v in flat_data.items():
+        # Check if we should exclude plasticity metrics
+        if exclude_plasticity:
+            priority, _ = get_metric_type_priority(k)
+            if priority == 2:  # 2 corresponds to Plasticity metrics
+                continue
+                
         v = np.array(v)
         if np.any(np.isnan(v)) and np.sum(np.isnan(v)) > len(v) // 2: 
             print(f"Too many nans key: {k}")
@@ -318,7 +324,7 @@ def generate_correlation_artifacts(flat_data, corr_dir, prefix="", order_method=
         print(f"  [!] Not enough valid metrics for {prefix}correlation analysis.")
         return
 
-    data_filename = f"{prefix}correlation_data.pkl"
+    data_filename = f"{prefix}correlation_data{'_no_plast' if exclude_plasticity else ''}.pkl"
     data_path = os.path.join(corr_dir, data_filename)
     with open(data_path, 'wb') as f:
         pickle.dump(valid_data, f)
@@ -361,31 +367,38 @@ def generate_correlation_artifacts(flat_data, corr_dir, prefix="", order_method=
     elif order_method == "alphabetical":
         print(f"  [x] Ordered metrics alphabetically")
 
-    heatmap_filename = f"{prefix}correlation_matrix_{order_method}.png" # Updated to save different versions uniquely
+    heatmap_filename = f"{prefix}correlation_matrix_{order_method}{'_no_plast' if exclude_plasticity else ''}.png" 
     heatmap_path = os.path.join(corr_dir, heatmap_filename)
     correlation_heatmap(corr_matrix, metric_names, heatmap_path)
     print(f"  [x] Saved Heatmap to {heatmap_path}")
     return metric_names
 
 
-def run_analysis(experiment_path, order_method="metric_type"):
-    print(f"--- Generating Correlation Analysis (Order: {order_method}) ---")
+def run_analysis(experiment_path, order_method="metric_type", exclude_plasticity=False):
+    exclusion_str = " (Excluding Plasticity)" if exclude_plasticity else ""
+    print(f"--- Generating Correlation Analysis (Order: {order_method}){exclusion_str} ---")
+    
     corr_dir = os.path.join(experiment_path, "correlations")
     os.makedirs(corr_dir, exist_ok=True)
     
     # 1. Continual Learning Analysis
     computed_data = compute_metric_differences(experiment_path)
     flat_data = _flatten_metrics(computed_data)
-    normal_keys = generate_correlation_artifacts(flat_data, corr_dir, prefix="", order_method=order_method)
+    normal_keys = generate_correlation_artifacts(
+        flat_data, corr_dir, prefix="", order_method=order_method, exclude_plasticity=exclude_plasticity
+    )
 
     # 2. Multi-Task Analysis
     mtl_flat_data = compute_mtl_differences(experiment_path)
     mtl_keys = None
     if mtl_flat_data:
-        mtl_keys = generate_correlation_artifacts(mtl_flat_data, corr_dir, prefix="mtl_", order_method=order_method)
+        mtl_keys = generate_correlation_artifacts(
+            mtl_flat_data, corr_dir, prefix="mtl_", order_method=order_method, exclude_plasticity=exclude_plasticity
+        )
 
     # 3. Save all valid keys to a single text file
-    keys_txt_path = os.path.join(corr_dir, "available_keys.txt")
+    keys_txt_filename = f"available_keys{'_no_plast' if exclude_plasticity else ''}.txt"
+    keys_txt_path = os.path.join(corr_dir, keys_txt_filename)
     with open(keys_txt_path, "w") as f:
         f.write("--- Normal (Continual Learning) Keys ---\n")
         if normal_keys:
@@ -405,13 +418,9 @@ def run_analysis(experiment_path, order_method="metric_type"):
 
 
 if __name__ == "__main__":
-    EXP_PATH = "/home/users/MTrappett/manifold/binary_classification/results/mnist/SL/"
+    EXP_PATH = "/home/users/MTrappett/manifold/binary_classification/results/mnist/RL/"
     
     if os.path.exists(EXP_PATH):
-        run_analysis(EXP_PATH, order_method="metric_type")
-        
-        # Or generate all three variations to compare:
-        # for method in ["alphabetical", "metric_type", "hierarchical"]:
-        #     run_analysis(EXP_PATH, order_method=method)
+        run_analysis(EXP_PATH, order_method="metric_type", exclude_plasticity=True)
     else:
         print(f"Experiment path not found: {EXP_PATH}")

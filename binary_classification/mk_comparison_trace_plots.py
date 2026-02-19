@@ -226,19 +226,30 @@ def plot_timeseries_grid(data_dict, category_name, save_path, config):
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=RuntimeWarning)
+                # Enforce 2D in case n_repeats=1 caused a flattened array elsewhere
+                if data.ndim == 1:
+                    data = data.reshape(-1, 1)
+                
                 mean = np.nanmean(data, axis=1)
                 std = np.nanstd(data, axis=1)
 
             steps = len(mean)
-            total_epochs = config.epochs_per_task * config.num_tasks
-            
-            # Dynamically calculate x-axis (works for log_frequency grids and per-epoch grids natively)
+            total_epochs = getattr(config, 'epochs_per_task', 1000) * getattr(config, 'num_tasks', 2)
             epochs = np.linspace(total_epochs / steps, total_epochs, steps)
 
-            ax.plot(epochs, mean, label=algo, color=colors[algo])
-            ax.fill_between(epochs, mean - std, mean + std, color=colors[algo], alpha=0.15, linewidth=0)
-            
-            max_x = max(max_x, epochs[-1] if len(epochs) > 0 else 0)
+            # --- FIX: Apply NaN Mask before plotting ---
+            mask = ~np.isnan(mean)
+            if mask.any():
+                ax.plot(epochs[mask], mean[mask], label=algo, color=colors[algo])
+                ax.fill_between(
+                    epochs[mask], 
+                    (mean - std)[mask], 
+                    (mean + std)[mask], 
+                    color=colors[algo], alpha=0.15, linewidth=0
+                )
+                
+                max_x = max(max_x, epochs[mask][-1] if len(epochs[mask]) > 0 else 0)
+
 
         if has_data:
             ax.set_title(metric, fontweight='bold', pad=10)
@@ -256,23 +267,27 @@ def plot_timeseries_grid(data_dict, category_name, save_path, config):
                         ax.text(boundary + (max_x * 0.01), ax.get_ylim()[0], f"Task {t+1}", 
                                 rotation=90, verticalalignment='bottom', fontsize=10, color='#555555')
 
-    # Remove empty subplots from the grid
     for j in range(len(metrics), len(axes)):
         axes[j].axis('off')
 
-    # Unified Legend and Titling
-    handles, labels = axes[0].get_legend_handles_labels()
+    # --- FIX: Collect Legend handles from ALL axes, not just axes[0] ---
+    handles, labels = [], []
+    for ax in axes:
+        h, l = ax.get_legend_handles_labels()
+        handles.extend(h)
+        labels.extend(l)
+        
     by_label = dict(zip(labels, handles)) # De-duplicate
     
-    # Adjust y position depending on the number of rows to avoid title collision
     legend_y = 1.15 if rows == 1 else 1.05
     title_y = 1.25 if rows == 1 else 1.10
     
-    fig.legend(
-        by_label.values(), by_label.keys(), 
-        loc='upper center', bbox_to_anchor=(0.5, legend_y), 
-        ncol=len(algorithms), frameon=False
-    )
+    if by_label:
+        fig.legend(
+            by_label.values(), by_label.keys(), 
+            loc='upper center', bbox_to_anchor=(0.5, legend_y), 
+            ncol=len(algorithms), frameon=False
+        )
 
     plt.suptitle(f"{category_name} Timeline Over Epochs", fontsize=20, fontweight='bold', y=title_y)
     
