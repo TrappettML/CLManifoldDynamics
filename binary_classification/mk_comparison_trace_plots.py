@@ -22,21 +22,25 @@ plt.rcParams.update({
 
 def load_algorithm_data(base_path):
     """
-    Scans the base directory for algorithm subfolders. Explicitly loads 
-    performance time-series data from global_history.pkl (or all_metrics.pkl), 
-    and manifold/plasticity data from their respective files.
+    Scans the base directory for algorithm subfolders. 
+    Strictly loads performance time-series data from global_history.pkl, 
+    and manifold/plasticity data from all_metrics.pkl.
     """
     data_by_algo = {}
     config = None
     
     for entry in os.listdir(base_path):
+        # Skip the output directory and hidden system files
+        if entry == "comparison_plots" or entry.startswith('.'):
+            continue
+            
         algo_dir = os.path.join(base_path, entry)
         if not os.path.isdir(algo_dir):
             continue
             
-        metrics_file = os.path.join(algo_dir, "all_metrics.pkl")
         config_file = os.path.join(algo_dir, "config.pkl")
         gh_file = os.path.join(algo_dir, "global_history.pkl")
+        all_metrics_file = os.path.join(algo_dir, "all_metrics.pkl")
         
         algo_data = {'performance': {}, 'plasticity': {}, 'glue': {}}
         loaded_any = False
@@ -46,41 +50,25 @@ def load_algorithm_data(base_path):
             with open(config_file, 'rb') as f:
                 config = pickle.load(f)
 
-        # 1. Load Performance Data (Prioritize global_history.pkl, fallback to all_metrics['cl'])
+        # 1. Load Performance Data strictly from global_history.pkl
         if os.path.exists(gh_file):
             with open(gh_file, 'rb') as f:
                 algo_data['performance'] = pickle.load(f)
             loaded_any = True
             
-        # 2. Load Unified Master Object (if exists)
-        if os.path.exists(metrics_file):
-            with open(metrics_file, 'rb') as f:
+        # 2. Load Plasticity and GLUE data strictly from all_metrics.pkl
+        if os.path.exists(all_metrics_file):
+            with open(all_metrics_file, 'rb') as f:
                 master_data = pickle.load(f)
-                if not algo_data['performance']:
-                    algo_data['performance'] = master_data.get('cl', {})
                 algo_data['plasticity'] = master_data.get('plasticity', {})
                 algo_data['glue'] = master_data.get('glue', {})
             loaded_any = True
-        else:
-            # Fallback for individual metric files
-            import glob
-            plast_files = glob.glob(os.path.join(algo_dir, "plastic_analysis_*.pkl"))
-            if plast_files:
-                with open(plast_files[0], 'rb') as f:
-                    algo_data['plasticity'] = pickle.load(f).get('history', {})
-                loaded_any = True
-                
-            glue_file = os.path.join(algo_dir, "glue_metrics.pkl")
-            if os.path.exists(glue_file):
-                with open(glue_file, 'rb') as f:
-                    algo_data['glue'] = pickle.load(f)
-                loaded_any = True
 
         if loaded_any:
             data_by_algo[entry] = algo_data
             print(f"Loaded metric data for algorithm: {entry}")
         else:
-            print(f"Skipping {entry}: No metric files found.")
+            print(f"Skipping {entry}: No metric files found. (Looked for global_history.pkl and all_metrics.pkl)")
             
     return data_by_algo, config
 
@@ -133,7 +121,10 @@ def extract_plasticity_data(data_by_algo):
     return plast_extracted
 
 def extract_glue_data(data_by_algo):
-    """Averages GLUE metric evaluations over all evaluated tasks and stitches over time."""
+    """
+    Extracts GLUE metrics structurally by Metric and Evaluated Task.
+    Stitches the timeline chronologically across all Training phases.
+    """
     glue_extracted = {}
     for algo, data in data_by_algo.items():
         g_data = data.get('glue', {})
@@ -142,42 +133,296 @@ def extract_glue_data(data_by_algo):
         algo_metrics = {}
         train_tasks = sorted(list(g_data.keys()))
         
-        # Discover all unique metric names
+        # Discover all unique metric names and evaluated tasks
         metrics = set()
+        eval_tasks = set()
         for t_train in train_tasks:
             for t_eval in g_data[t_train].keys():
+                eval_tasks.add(t_eval)
                 metrics.update(g_data[t_train][t_eval].keys())
         
-        # Aggregate the timeline per metric
+        metrics = sorted(list(metrics))
+        eval_tasks = sorted(list(eval_tasks))
+        
+        # Aggregate the timeline per metric and per eval task
         for metric in metrics:
-            stitched_raw = []
-            for t_train in train_tasks:
-                eval_tasks = list(g_data[t_train].keys())
-                arrays = []
-                for t_eval in eval_tasks:
-                    if metric in g_data[t_train][t_eval]:
-                        arrays.append(np.array(g_data[t_train][t_eval][metric]))
-                
-                if arrays:
-                    stacked = np.stack(arrays, axis=0)
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", category=RuntimeWarning)
-                        # Average evaluations over the current train block 
-                        mean_over_eval = np.nanmean(stacked, axis=0) 
-                    stitched_raw.append(mean_over_eval)
+            algo_metrics[metric] = {}
+            for t_eval in eval_tasks:
+                stitched_raw = []
+                for t_train in train_tasks:
+                    # Find expected shape L for this train task (handle missing eval tasks gracefully)
+                    expected_shape = None
+                    for temp_eval in g_data[t_train]:
+                        if metric in g_data[t_train][temp_eval]:
+                            expected_shape = np.array(g_data[t_train][temp_eval][metric]).shape
+                            break
+                            
+                    if expected_shape is None:
+                        continue # No data at all for this metric in this train block
+                        
+                    if t_eval in g_data[t_train] and metric in g_data[t_train][t_eval]:
+                        stitched_raw.append(np.array(g_data[t_train][t_eval][metric]))
+                    else:
+                        # Pad with NaNs if this specific eval task was skipped in this block
+                        stitched_raw.append(np.full(expected_shape, np.nan))
+                        
+                if stitched_raw:
+                    # Concatenate the sequential training blocks into one global timeline
+                    algo_metrics[metric][t_eval] = np.concatenate(stitched_raw, axis=0) 
                     
-            if stitched_raw:
-                # Concatenate the sequential training blocks into one global timeline
-                algo_metrics[metric] = np.concatenate(stitched_raw, axis=0) 
-                
         if algo_metrics:
             glue_extracted[algo] = algo_metrics
+            
     return glue_extracted
+
+def plot_performance_grid(acc_data, loss_data, save_path, config):
+    """
+    Plots Accuracy and Loss in the same figure.
+    Row 0: Accuracy across tasks
+    Row 1: Loss across tasks
+    """
+    if not acc_data and not loss_data:
+        print("No performance data available. Skipping plot.")
+        return
+
+    # Discover unique evaluated tasks across all algorithms
+    tasks = set()
+    algorithms = sorted(list(acc_data.keys()))
+    for algo in algorithms:
+        tasks.update(acc_data[algo].keys())
+    tasks = sorted(list(tasks))
+    
+    cols = len(tasks)
+    rows = 2
+    
+    if cols == 0:
+        return
+        
+    fig_width = max(12, 6 * cols)
+    fig_height = max(8, 4 * rows)
+    fig, axes = plt.subplots(rows, cols, figsize=(fig_width, fig_height), squeeze=False)
+    
+    cmap = plt.get_cmap('tab10')
+    colors = {algo: cmap(i % 10) for i, algo in enumerate(algorithms)}
+    
+    metrics_data = [
+        ('Accuracy', acc_data),
+        ('Loss', loss_data)
+    ]
+    
+    for r, (metric_name, data_dict) in enumerate(metrics_data):
+        for c, task in enumerate(tasks):
+            ax = axes[r, c]
+            max_x = 0
+            has_data = False
+            
+            for algo in algorithms:
+                if algo not in data_dict or task not in data_dict[algo]:
+                    continue
+                    
+                data = data_dict[algo][task] # (Steps, Repeats)
+                if data.size == 0: continue
+                    
+                has_data = True
+                
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    if data.ndim == 1:
+                        data = data.reshape(-1, 1)
+                        
+                    mean = np.nanmean(data, axis=1)
+                    std = np.nanstd(data, axis=1)
+                    
+                steps = len(mean)
+                total_epochs = getattr(config, 'epochs_per_task', 1000) * getattr(config, 'num_tasks', 2)
+                epochs = np.linspace(total_epochs / steps, total_epochs, steps)
+                
+                mask = ~np.isnan(mean)
+                if mask.any():
+                    ax.plot(epochs[mask], mean[mask], label=algo, color=colors[algo])
+                    ax.fill_between(
+                        epochs[mask], 
+                        (mean - std)[mask], 
+                        (mean + std)[mask], 
+                        color=colors[algo], alpha=0.15, linewidth=0
+                    )
+                    max_x = max(max_x, epochs[mask][-1] if len(epochs[mask]) > 0 else 0)
+                    
+            if has_data:
+                # Setup Grid Titles and Labels
+                if r == 0: # Top row gets Col Titles
+                    ax.set_title(f"Task: {task}", fontweight='bold', pad=10)
+                if c == 0: # Left Col gets Row Titles
+                    ax.set_ylabel(metric_name, fontweight='bold')
+                if r == rows - 1: # Bottom Row gets X Labels
+                    ax.set_xlabel("Epochs")
+                    
+                ax.set_xlim(0, max_x)
+                
+                # Draw task boundaries clearly
+                for t in range(1, config.num_tasks):
+                    boundary = t * config.epochs_per_task
+                    if boundary < max_x:
+                        ax.axvline(x=boundary, color='#333333', linestyle=':', alpha=0.6, linewidth=1.5)
+                        if r == 0 and c == 0: # Label boundaries on first subplot only
+                            ax.text(boundary + (max_x * 0.01), ax.get_ylim()[0], f"Task {t+1}", 
+                                    rotation=90, verticalalignment='bottom', fontsize=10, color='#555555')
+                                    
+    # Collect unique legend handles and labels
+    handles, labels = [], []
+    for ax in axes.flatten():
+        h, l = ax.get_legend_handles_labels()
+        handles.extend(h)
+        labels.extend(l)
+        
+    by_label = dict(zip(labels, handles))
+
+    # Add the figure title
+    plt.suptitle("Performance Timeline Over Epochs", fontsize=20, fontweight='bold')
+
+    # Place the legend at the top, just below the title
+    if by_label:
+        fig.legend(
+            by_label.values(), by_label.keys(), 
+            loc='upper center', bbox_to_anchor=(0.5, 0.95), 
+            ncol=len(by_label), frameon=False
+        )
+        
+    # Use tight_layout's rect parameter to reserve the top 8% of the figure 
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"Saved Performance multi-plot to {save_path}")
+
+
+def plot_glue_timeseries_grid(data_dict, category_name, save_path, config):
+    """
+    Creates a dynamic grid specific for GLUE metrics where:
+    Rows = Metrics
+    Cols = Evaluated Tasks
+    """
+    if not data_dict:
+        print(f"No data available for {category_name}. Skipping plot.")
+        return
+        
+    # Discover unique metrics and evaluated tasks across all algorithms
+    metrics = set()
+    eval_tasks = set()
+    algorithms = sorted(list(data_dict.keys()))
+    
+    for algo in algorithms:
+        metrics.update(data_dict[algo].keys())
+        for metric in data_dict[algo].keys():
+            eval_tasks.update(data_dict[algo][metric].keys())
+            
+    metrics = sorted(list(metrics))
+    eval_tasks = sorted(list(eval_tasks))
+    
+    rows = len(metrics)
+    cols = len(eval_tasks)
+    
+    if rows == 0 or cols == 0:
+        return
+        
+    fig_width = max(12, 6 * cols)
+    fig_height = max(6, 4 * rows)
+    fig, axes = plt.subplots(rows, cols, figsize=(fig_width, fig_height), squeeze=False)
+    
+    cmap = plt.get_cmap('tab10')
+    colors = {algo: cmap(i % 10) for i, algo in enumerate(algorithms)}
+    
+    for r, metric in enumerate(metrics):
+        for c, t_eval in enumerate(eval_tasks):
+            ax = axes[r, c]
+            max_x = 0
+            has_data = False
+            
+            for algo in algorithms:
+                if metric not in data_dict[algo] or t_eval not in data_dict[algo][metric]:
+                    continue
+                    
+                data = data_dict[algo][metric][t_eval] # (Steps, Repeats)
+                if data.size == 0: continue
+                    
+                has_data = True
+                
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    if data.ndim == 1:
+                        data = data.reshape(-1, 1)
+                        
+                    mean = np.nanmean(data, axis=1)
+                    std = np.nanstd(data, axis=1)
+                    
+                steps = len(mean)
+                total_epochs = getattr(config, 'epochs_per_task', 1000) * getattr(config, 'num_tasks', 2)
+                epochs = np.linspace(total_epochs / steps, total_epochs, steps)
+                
+                mask = ~np.isnan(mean)
+                if mask.any():
+                    ax.plot(epochs[mask], mean[mask], label=algo, color=colors[algo])
+                    ax.fill_between(
+                        epochs[mask], 
+                        (mean - std)[mask], 
+                        (mean + std)[mask], 
+                        color=colors[algo], alpha=0.15, linewidth=0
+                    )
+                    max_x = max(max_x, epochs[mask][-1] if len(epochs[mask]) > 0 else 0)
+                    
+            if has_data:
+                # Clean up names for presentation
+                clean_task_name = t_eval.replace('_', ' ').replace('00', '').title()
+                
+                # Setup Grid Titles and Labels
+                if r == 0: # Top row gets Col Titles
+                    ax.set_title(f"Eval: {clean_task_name}", fontweight='bold', pad=10)
+                if c == 0: # Left Col gets Row Titles
+                    ax.set_ylabel(metric, fontweight='bold')
+                if r == rows - 1: # Bottom Row gets X Labels
+                    ax.set_xlabel("Epochs")
+                    
+                ax.set_xlim(0, max_x)
+                
+                # Draw task boundaries clearly
+                for t in range(1, config.num_tasks):
+                    boundary = t * config.epochs_per_task
+                    if boundary < max_x:
+                        ax.axvline(x=boundary, color='#333333', linestyle=':', alpha=0.6, linewidth=1.5)
+                        if r == 0 and c == 0: # Label boundaries on first subplot only
+                            ax.text(boundary + (max_x * 0.01), ax.get_ylim()[0], f"Task {t+1}", 
+                                    rotation=90, verticalalignment='bottom', fontsize=10, color='#555555')
+                                    
+    # Collect unique legend handles and labels
+    handles, labels = [], []
+    for ax in axes.flatten():
+        h, l = ax.get_legend_handles_labels()
+        handles.extend(h)
+        labels.extend(l)
+        
+    by_label = dict(zip(labels, handles))
+
+    # Add the figure title
+    plt.suptitle(f"{category_name} Timeline Over Epochs", fontsize=20, fontweight='bold')
+
+    # Place the legend at the top, just below the title
+    if by_label:
+        fig.legend(
+            by_label.values(), by_label.keys(), 
+            loc='upper center', bbox_to_anchor=(0.5, 0.95), 
+            ncol=len(by_label), frameon=False
+        )
+        
+    # Use tight_layout's rect parameter to reserve the top 8% of the figure 
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"Saved {category_name} multi-plot to {save_path}")
+
 
 def plot_timeseries_grid(data_dict, category_name, save_path, config):
     """
-    Creates a master grid of subplots for all available metrics within a category,
-    overlaying multiple algorithms with a unified legend.
+    Creates a master grid of subplots for all available metrics within a category.
+    (Used primarily for Plasticity Metrics).
     """
     if not data_dict:
         print(f"No data available for {category_name}. Skipping plot.")
@@ -237,7 +482,6 @@ def plot_timeseries_grid(data_dict, category_name, save_path, config):
             total_epochs = getattr(config, 'epochs_per_task', 1000) * getattr(config, 'num_tasks', 2)
             epochs = np.linspace(total_epochs / steps, total_epochs, steps)
 
-            # --- FIX: Apply NaN Mask before plotting ---
             mask = ~np.isnan(mean)
             if mask.any():
                 ax.plot(epochs[mask], mean[mask], label=algo, color=colors[algo])
@@ -262,39 +506,39 @@ def plot_timeseries_grid(data_dict, category_name, save_path, config):
                 boundary = t * config.epochs_per_task
                 if boundary < max_x:
                     ax.axvline(x=boundary, color='#333333', linestyle=':', alpha=0.6, linewidth=1.5)
-                    # Add task label slightly offset
-                    if i == 0: # Only put text on first plot to avoid clutter
+                    if i == 0: 
                         ax.text(boundary + (max_x * 0.01), ax.get_ylim()[0], f"Task {t+1}", 
                                 rotation=90, verticalalignment='bottom', fontsize=10, color='#555555')
 
     for j in range(len(metrics), len(axes)):
         axes[j].axis('off')
 
-    # --- FIX: Collect Legend handles from ALL axes, not just axes[0] ---
+    # Collect unique legend handles and labels
     handles, labels = [], []
     for ax in axes:
         h, l = ax.get_legend_handles_labels()
         handles.extend(h)
         labels.extend(l)
         
-    by_label = dict(zip(labels, handles)) # De-duplicate
-    
-    legend_y = 1.15 if rows == 1 else 1.05
-    title_y = 1.25 if rows == 1 else 1.10
-    
+    by_label = dict(zip(labels, handles))
+
+    # Add the figure title
+    plt.suptitle(f"{category_name} Timeline Over Epochs", fontsize=20, fontweight='bold')
+
+    # Place the legend at the top, just below the title
     if by_label:
         fig.legend(
             by_label.values(), by_label.keys(), 
-            loc='upper center', bbox_to_anchor=(0.5, legend_y), 
-            ncol=len(algorithms), frameon=False
+            loc='upper center', bbox_to_anchor=(0.5, 0.95), 
+            ncol=len(by_label), frameon=False
         )
-
-    plt.suptitle(f"{category_name} Timeline Over Epochs", fontsize=20, fontweight='bold', y=title_y)
-    
-    plt.tight_layout()
+        
+    # Use tight_layout's rect parameter to reserve the top 8% of the figure 
+    plt.tight_layout(rect=[0, 0, 1, 0.92])
     plt.savefig(save_path, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"Saved {category_name} multi-plot to {save_path}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Generate algorithm comparison time-series subplots.")
@@ -339,27 +583,23 @@ def main():
     # Plot Generation (Subplot panels)
     print("\nGenerating Time-Series Plots...")
     
-    plot_timeseries_grid(
+    # 1. Performance (Accuracy and Loss combined into one grid)
+    plot_performance_grid(
         acc_data, 
-        category_name="Performance (Accuracy)", 
-        save_path=os.path.join(output_dir, "performance_comparison_plots_accuracy.png"),
-        config=config
-    )
-    
-    plot_timeseries_grid(
         loss_data, 
-        category_name="Performance (Loss)", 
-        save_path=os.path.join(output_dir, "performance_comparison_plots_loss.png"),
+        save_path=os.path.join(output_dir, "performance_timeseries_comparison.png"),
         config=config
     )
     
-    plot_timeseries_grid(
+    # 2. GLUE Manifold Geometry
+    plot_glue_timeseries_grid(
         glue_data, 
         category_name="Manifold Geometry (GLUE)", 
         save_path=os.path.join(output_dir, "glue_timeseries_comparison.png"),
         config=config
     )
     
+    # 3. Plasticity
     plot_timeseries_grid(
         plasticity_data, 
         category_name="Network Plasticity", 

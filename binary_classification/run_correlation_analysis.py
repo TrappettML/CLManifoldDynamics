@@ -109,6 +109,7 @@ def compute_metric_differences(experiment_path):
                             results['glue'][metric][t_eval] = rel_diff
                             
                         except (KeyError, IndexError):
+                            print(f"Metric {metric} had error taking difference.")
                             pass
                 
                 print(f"  [x] Processed GLUE relative differences")
@@ -252,11 +253,6 @@ def _flatten_metrics(computed_data):
                      vec = rem[0, 1, :] 
                      flat_data["CL_Rem_Eval0_Train1"] = np.array(vec)
 
-        if 'stats' in cl and 'accuracy' in cl['stats']:
-            acc = cl['stats']['accuracy']
-            if isinstance(acc, (np.ndarray, jnp.ndarray)) and acc.ndim == 2:
-                 flat_data['CL_Avg_Accuracy'] = np.mean(acc, axis=1)
-
     clean_data = {}
     for key, val in flat_data.items():
         if len(val) < 2: continue
@@ -275,8 +271,8 @@ def correlation_heatmap(correlations, labels, save_path):
 
     ax.set_xticks(np.arange(len(labels)))
     ax.set_yticks(np.arange(len(labels)))
-    ax.set_xticklabels(labels)
-    ax.set_yticklabels(labels)
+    ax.set_xticklabels(labels, fontsize=12, fontweight='bold')
+    ax.set_yticklabels(labels, fontsize=12, fontweight='bold')
 
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
 
@@ -293,9 +289,15 @@ def correlation_heatmap(correlations, labels, save_path):
     plt.savefig(save_path, dpi=150)
     plt.close()
 
-def generate_correlation_artifacts(flat_data, corr_dir, prefix="", order_method="hierarchical", exclude_plasticity=False):
+def generate_correlation_artifacts(flat_data, corr_dir, prefix="", order_method="hierarchical", exclude_plasticity=False, include_only=None):
     valid_data = {}
     for k, v in flat_data.items():
+        # --- NEW: Filter by included metrics if specified ---
+        if include_only is not None:
+            # Check if any of the target substrings are in the metric key (case-insensitive)
+            if not any(target.lower() in k.lower() for target in include_only):
+                continue
+                
         # Check if we should exclude plasticity metrics
         if exclude_plasticity:
             priority, _ = get_metric_type_priority(k)
@@ -374,9 +376,10 @@ def generate_correlation_artifacts(flat_data, corr_dir, prefix="", order_method=
     return metric_names
 
 
-def run_analysis(experiment_path, order_method="metric_type", exclude_plasticity=False):
+def run_analysis(experiment_path, order_method="metric_type", exclude_plasticity=False, include_only=None):
     exclusion_str = " (Excluding Plasticity)" if exclude_plasticity else ""
-    print(f"--- Generating Correlation Analysis (Order: {order_method}){exclusion_str} ---")
+    filter_str = " (Custom Filter)" if include_only else ""
+    print(f"--- Generating Correlation Analysis (Order: {order_method}){exclusion_str}{filter_str} ---")
     
     corr_dir = os.path.join(experiment_path, "correlations")
     os.makedirs(corr_dir, exist_ok=True)
@@ -385,7 +388,8 @@ def run_analysis(experiment_path, order_method="metric_type", exclude_plasticity
     computed_data = compute_metric_differences(experiment_path)
     flat_data = _flatten_metrics(computed_data)
     normal_keys = generate_correlation_artifacts(
-        flat_data, corr_dir, prefix="", order_method=order_method, exclude_plasticity=exclude_plasticity
+        flat_data, corr_dir, prefix="", order_method=order_method, 
+        exclude_plasticity=exclude_plasticity, include_only=include_only
     )
 
     # 2. Multi-Task Analysis
@@ -393,7 +397,8 @@ def run_analysis(experiment_path, order_method="metric_type", exclude_plasticity
     mtl_keys = None
     if mtl_flat_data:
         mtl_keys = generate_correlation_artifacts(
-            mtl_flat_data, corr_dir, prefix="mtl_", order_method=order_method, exclude_plasticity=exclude_plasticity
+            mtl_flat_data, corr_dir, prefix="mtl_", order_method=order_method, 
+            exclude_plasticity=exclude_plasticity, include_only=include_only
         )
 
     # 3. Save all valid keys to a single text file
@@ -418,9 +423,17 @@ def run_analysis(experiment_path, order_method="metric_type", exclude_plasticity
 
 
 if __name__ == "__main__":
-    EXP_PATH = "/home/users/MTrappett/manifold/binary_classification/results/mnist/RL/"
+    EXP_PATH = "/home/users/MTrappett/manifold/binary_classification/results/mnist/SL/"
+    
+    # Define partial strings to match the metrics you want
+    target_metrics = ['Rem', 'Transfer', 'Capacity', 'Dimension', 'Radius']
     
     if os.path.exists(EXP_PATH):
-        run_analysis(EXP_PATH, order_method="metric_type", exclude_plasticity=True)
+        run_analysis(
+            EXP_PATH, 
+            order_method="metric_type", 
+            exclude_plasticity=True,
+            include_only=target_metrics
+        )
     else:
         print(f"Experiment path not found: {EXP_PATH}")

@@ -7,7 +7,7 @@ from scipy.stats import pearsonr
 
 def plot_scatter(experiment_path, metric_x, metric_y, use_mtl=False):
     # 1. Locate Data
-    filename = "mtl_correlation_data.pkl" if use_mtl else "correlation_data.pkl"
+    filename = "mtl_correlation_data.pkl" if use_mtl else "correlation_data_no_plast.pkl"
     data_path = os.path.join(experiment_path, "correlations", filename)
     save_dir = os.path.join(experiment_path, "correlations")
     
