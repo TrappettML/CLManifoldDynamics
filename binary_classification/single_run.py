@@ -39,17 +39,19 @@ def main():
         choices=['SL', 'RL'],
         help="Learning Algorithm"
     )
-    # Swapped type=bool for action='store_true'
+
     parser.add_argument(
         '--use_replay',
         action='store_true',
-        help="Use Experience Replay or Not"
+        help="Use Experience Replay -- Not yet implemented"
     )
+
     parser.add_argument(
         '--add_plasticity',
         action='store_true',
-        help="Add Plasticity via ShrinkPertrub"
+        help="Add Plasticity via ShrinkPertrub -- Not yet implmented"
     )
+
     parser.add_argument(
         '--use_ul',
         action='store_true',
@@ -60,8 +62,7 @@ def main():
 
     # --- 2. Load Config ---
     # Pass the new arguments into the config builder
-    config = config_module.get_config(
-        args.dataset, 
+    config = config_module.get_config( 
         args.algorithm,
         use_replay=args.use_replay,
         add_plasticity=args.add_plasticity,
@@ -105,13 +106,11 @@ def main():
         config.dataset_name,
         config.data_dir,
         train=True,
-        img_size=config.downsample_dim
     )
     X_test_global, Y_test_global = data_utils.get_base_data_jax(
         config.dataset_name,
         config.data_dir,
         train=False,
-        img_size=config.downsample_dim
     )
 
     # --- 5. PHASE 3: Pre-load ALL Test Data (Spec Section 2) ---

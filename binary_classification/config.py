@@ -1,7 +1,7 @@
 import ml_collections
 import os
 
-def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, dataset_name="imagenet_gray_28_") -> ml_collections.ConfigDict:
+def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, dataset_name="imagenet_28_gray") -> ml_collections.ConfigDict:
     config = ml_collections.ConfigDict()
 
     # Store boolean flags
@@ -19,13 +19,13 @@ def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, 
         algo_name += "_ul"
 
     # Algorithm & Dataset
-    config.algorithm = algo_name + '_'
+    config.algorithm = algo_name
     config.dataset_name = dataset_name
     config.seed = 42
     
     # Directory Structure (Aligned with Spec Section 4)
     # Spec: results/{dataset}/{algorithm}/task_001/
-    config.data_dir = "./data"  # PyTorch dataset cache
+    config.data_dir = f"./data/{dataset_name}"  # PyTorch dataset cache
     config.results_root = "results"
     
     # These will now dynamically use the new appended algorithm name (e.g., SL_er_pl)
@@ -36,9 +36,7 @@ def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, 
     config.num_tasks = 2
     
     # Model & Data
-    down_sample = 15
-    config.input_dim = int(down_sample**2)
-    config.downsample_dim = down_sample
+    config.input_dim = 28*28 # using imagenet downsampled to 28x28
     config.hidden_dim = 64
     
     # Optimization
@@ -48,7 +46,7 @@ def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, 
     config.weight_decay = 0.0
     
     # Training Schedule
-    config.epochs_per_task = 1000
+    config.epochs_per_task = 100
     config.log_frequency = 10
     config.n_repeats = 30
     
