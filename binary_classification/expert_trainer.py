@@ -122,7 +122,7 @@ def train_single_expert(config, train_task, test_data):
 
 
 
-def run_random_baseline(config, test_data_dict, analysis_subset):
+def run_random_baseline(config, test_data_dict):
     """
     Evaluates a randomly initialized network (no training).
     Saves representations and metrics to results/.../random/
@@ -136,27 +136,21 @@ def run_random_baseline(config, test_data_dict, analysis_subset):
     save_dir = os.path.join(config.results_dir, "random")
     os.makedirs(save_dir, exist_ok=True)
     
-    # 3. Extract Representations (Analysis Subset)
-    # analysis_subset is (Images, Labels)
-    if analysis_subset is not None:
-        print("  Extracting random representations...")
-        # shape: (Repeats, Samples, Hidden)
-        reps = learner._extract_features_jit(learner.state, analysis_subset[0])
-        np.save(os.path.join(save_dir, "representations.npy"), reps)
-        
     # 4. Evaluate on All Tasks
     print("  Evaluating on test sets...")
     metrics = {'acc': {}, 'loss': {}}
-    
+    all_reps = []
     for task_name, (t_imgs, t_lbls) in test_data_dict.items():
-        loss, acc = learner._eval_jit(learner.state, t_imgs, t_lbls)
+        (loss, acc), reps = learner._eval_jit(learner.state, t_imgs, t_lbls)
         # Convert to numpy and store
         metrics['loss'][task_name] = np.array(loss) # (Repeats,)
         metrics['acc'][task_name] = np.array(acc)   # (Repeats,)
-        
+        all_reps.append(reps)
+
     # 5. Save Metrics
-    with open(os.path.join(save_dir, "metrics.pkl"), 'wb') as f:
-        pickle.dump(metrics, f)
+    metrics_reps = {'metrics': metrics, 'reps': all_reps}
+    with open(os.path.join(save_dir, "metrics_reps.pkl"), 'wb') as f:
+        pickle.dump(metrics_reps, f)
         
     print(f"  Random baseline saved to {save_dir}")
 

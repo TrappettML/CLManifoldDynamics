@@ -98,6 +98,7 @@ class ContinualLearner:
         Returns:
             loss: (Repeats,)
             acc: (Repeats,)
+            reps: (total_samples, repeats, Dim)
         """
         # Transpose to (Repeats, Total_Samples, Dim) for vmap
         images_t = jnp.swapaxes(images, 0, 1)
@@ -106,7 +107,12 @@ class ContinualLearner:
         def eval_single(curr_state, curr_imgs, curr_lbls):
             return self.algo.eval_step(curr_state, (curr_imgs, curr_lbls))
         
-        return jax.vmap(eval_single, in_axes=(0, 0, 0))(state, images_t, labels_t)
+        def extract_single(curr_state, curr_imgs):
+            return self.algo.get_features(curr_state, curr_imgs)
+        
+        evals = jax.vmap(eval_single, in_axes=(0, 0, 0))(state, images_t, labels_t)
+        representations = jax.vmap(extract_single, in_axes=(0, 0))(state, images_t)
+        return evals, representations
 
     @partial(jax.jit, static_argnums=(0,))
     def _extract_features_jit(self, state, images):
@@ -128,7 +134,7 @@ class ContinualLearner:
         
         return jax.vmap(extract_single, in_axes=(0, 0))(state, images_t)
 
-    def train_task(self, task, test_data_dict, global_history, analysis_subset=None):
+    def train_task(self, task, test_data_dict, global_history):
         """
         Trains on a single task using nested jax.lax.scan.
         
@@ -167,11 +173,6 @@ class ContinualLearner:
         # Move to device
         epoch_data_imgs = jax.device_put(epoch_data_imgs)
         epoch_data_lbls = jax.device_put(epoch_data_lbls)
-
-        # Analysis data
-        analysis_imgs = None
-        if analysis_subset:
-            analysis_imgs, _ = self.preload_data(analysis_subset)
 
         # Cache test data
         if not hasattr(self, 'cached_test_data'):
@@ -213,32 +214,27 @@ class ContinualLearner:
                 # Evaluate on all test tasks
                 def run_eval(s):
                     results = {}
+                    all_reps = []
                     for t_name in sorted(test_data_jax.keys()):
                         ti, tl = test_data_jax[t_name]
-                        l, a = self._eval_jit(s, ti, tl)
+                        (l, a), reps = self._eval_jit(s, ti, tl)
                         results[t_name] = (l, a)
-                    return results
+                        all_reps.append(reps)
+                    # stack reps as expeted of down stream processing
+                    all_reps = jnp.stack(all_reps)
+                    return results, all_reps
                 
-                test_metrics_sparse = run_eval(state_end)
+                test_metrics_sparse, reps_sparse = run_eval(state_end)
                 
                 # Flatten weights
                 flat_w = self.get_flat_params(state_end)
-                
-                # Extract representations
-                if analysis_imgs is not None:
-                    reps = self._extract_features_jit(state_end, analysis_imgs)
-                    # Verify shape: (Repeats, Samples, Hidden_Dim)
-                    expected_shape = (self.config.n_repeats, analysis_imgs.shape[0], self.config.hidden_dim)
-                    assert reps.shape == expected_shape, f"Rep shape {reps.shape} != {expected_shape}"
-                else:
-                    reps = jnp.zeros((1,))
                 
                 metrics = {
                     'tr_loss': block_losses,
                     'tr_acc': block_accs,
                     'test': test_metrics_sparse,
                     'weights': flat_w,
-                    'reps': reps
+                    'reps': reps_sparse
                 }
                 
                 return state_end, metrics
@@ -290,8 +286,8 @@ class ContinualLearner:
         
         # Extract histories for saving
         weight_history = history_np['weights']  # (Outer, Repeats, Param_Dim)
-        rep_history = history_np['reps'] if analysis_subset else None  # (Outer, Repeats, Samples, Hidden)
-        
+        rep_history = history_np['reps']  # (numTasks*nTestSamples, repeats, hiddenDim)
+
         for h in self.hooks:
             h.on_task_end(task, self.state, metrics=None)
         

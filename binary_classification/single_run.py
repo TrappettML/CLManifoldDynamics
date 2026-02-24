@@ -184,46 +184,17 @@ def main():
             'data': (train_X, train_Y), # Canonical: (N, R, D)
             'n_samples': train_X.shape[0]
         }
-        
-        # ---------------------------------------------------------
-        # 2. PREPARE ANALYSIS SUBSET (ALL TASKS)
-        # ---------------------------------------------------------
-        # Spec Requirement: "subsamples from every task's test set"
-        # We stack subsamples from Task 0...Task T to track representation drift
-        
-        analysis_X_list = []
-        analysis_Y_list = []
-        
-        # Iterate over all tasks (not just current)
-        for t in range(config.num_tasks):
-            t_name_iter = f"task_{t:03d}"
-            t_test_X, t_test_Y = test_data_dict[t_name_iter]
-            
-            n_total = t_test_X.shape[0]
-            n_sub = min(n_total, config.analysis_subsamples)
-            
-            # Use sorted indices for consistency across time steps
-            indices = rng.choice(n_total, size=n_sub, replace=False)
-            indices.sort()
-            
-            analysis_X_list.append(t_test_X[indices])
-            analysis_Y_list.append(t_test_Y[indices])
-            
-        # Concatenate: (Num_Tasks * S, R, D)
-        analysis_data_X = jnp.concatenate(analysis_X_list, axis=0)
-        analysis_data_Y = jnp.concatenate(analysis_Y_list, axis=0)
-        analysis_subset = (analysis_data_X, analysis_data_Y)
-        
+
+        # TODO: convert to using test data
         # Save analysis labels (reshaped for clarity: Num_Tasks, Subsamples, R)
         task_dir = os.path.join(config.results_dir, task_name)
         os.makedirs(task_dir, exist_ok=True)
         
-        analysis_lbls_reshaped = analysis_data_Y.squeeze(-1) # (T*S, R)
-        analysis_lbls_reshaped = analysis_lbls_reshaped.reshape(config.num_tasks, config.analysis_subsamples, config.n_repeats).transpose(2,0,1) # match repres: (R,T,S)
-        np.save(os.path.join(task_dir, "binary_labels.npy"), np.array(analysis_lbls_reshaped))
-        
+        with open(os.path.join(task_dir, "binary_labels.npy"), 'wb') as f:
+            pickle.dump(test_data_dict, f)
+
         # Get Random Performance
-        run_random_baseline(config, test_data_dict, analysis_subset)
+        run_random_baseline(config, test_data_dict)
 
         # -------- -------------------------------------------------
         # 3. TRAIN LEARNER
@@ -231,12 +202,14 @@ def main():
         #
         # Returns rep_history: (L, Repeats, Total_Samples, Hidden)
         rep_history, weight_history = learner.train_task(
-            task, test_data_dict, global_history, analysis_subset=analysis_subset
+            task, test_data_dict, global_history
         )
         # L = logged epochs
         # Reshape Representations to match Spec: (L, Repeats, N_Eval_Tasks, N_Subsamples, Hidden_Dim)
+        # rep_history.shape: (10, 2, 30, 400, 64)
+        # 
         if rep_history is not None:
-            L, R, SxT_eval, H = rep_history.shape
+            L, n_Tasks, R, SxT_eval, H = rep_history.shape
             T_eval = config.num_tasks
             S = config.analysis_subsamples
             
@@ -290,7 +263,7 @@ def main():
         # ---------------------------------------------------------
         # 5. CLEANUP
         # ---------------------------------------------------------
-        del train_X, train_Y, task, expert_task_wrapper, analysis_data_X, analysis_data_Y
+        del train_X, train_Y, task, expert_task_wrapper
         
         total_epochs += config.epochs_per_task
         task_boundaries.append(total_epochs)
@@ -299,19 +272,19 @@ def main():
 
     learner.clear_test_cache()
     
-
+    # TODO: Remove multitask learn and move to a standalone
     # ---------------------------------------------------------
     # Train Multi-Task Learner
     # ---------------------------------------------------------
     # Uses the global training data and the analysis subset created earlier
-    train_multitask(
-        config, 
-        task_class_pairs, 
-        X_train_global, 
-        Y_train_global, 
-        test_data_dict, 
-        analysis_subset
-    )
+
+    # train_multitask(
+    #     config, 
+    #     task_class_pairs, 
+    #     X_train_global, 
+    #     Y_train_global, 
+    #     test_data_dict, 
+    # )
     # ---------------------------------------------------------
     # CL Metrics
     # ---------------------------------------------------------
@@ -399,32 +372,32 @@ def main():
             ax1.axhline(y=np.nanmean(r_acc), color=color, linestyle=':', alpha=0.5, linewidth=1.5)
             ax2.axhline(y=np.nanmean(r_loss), color=color, linestyle=':', alpha=0.5, linewidth=1.5)
 
-        # --- Plot Multi-Task Baseline (Dash-Dot Curve) ---
-        if mtl_history and task_name in mtl_history['test_metrics']:
-            m_acc = np.array(mtl_history['test_metrics'][task_name]['acc'])
-            m_loss = np.array(mtl_history['test_metrics'][task_name]['loss'])
+        # # --- Plot Multi-Task Baseline (Dash-Dot Curve) ---
+        # if mtl_history and task_name in mtl_history['test_metrics']:
+        #     m_acc = np.array(mtl_history['test_metrics'][task_name]['acc'])
+        #     m_loss = np.array(mtl_history['test_metrics'][task_name]['loss'])
             
-            # Ensure 2D (Epochs, Repeats)
-            if m_acc.ndim == 1: m_acc = m_acc.reshape(-1, config.n_repeats)
-            if m_loss.ndim == 1: m_loss = m_loss.reshape(-1, config.n_repeats)
+        #     # Ensure 2D (Epochs, Repeats)
+        #     if m_acc.ndim == 1: m_acc = m_acc.reshape(-1, config.n_repeats)
+        #     if m_loss.ndim == 1: m_loss = m_loss.reshape(-1, config.n_repeats)
 
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", category=RuntimeWarning)
-                m_acc_mean = np.nanmean(m_acc, axis=1)
-                m_loss_mean = np.nanmean(m_loss, axis=1)
+        #     with warnings.catch_warnings():
+        #         warnings.simplefilter("ignore", category=RuntimeWarning)
+        #         m_acc_mean = np.nanmean(m_acc, axis=1)
+        #         m_loss_mean = np.nanmean(m_loss, axis=1)
 
-            # Mask NaNs (sparse logging)
-            m_mask = ~np.isnan(m_acc_mean)
+        #     # Mask NaNs (sparse logging)
+        #     m_mask = ~np.isnan(m_acc_mean)
             
-            # Plot aligned with global epochs
-            if m_mask.any():
-                # Slice epochs_range in case MTL length differs slightly due to rounding
-                limit = min(len(epochs_range), len(m_acc_mean))
-                ax1.plot(epochs_range[:limit][m_mask[:limit]], m_acc_mean[:limit][m_mask[:limit]], 
-                         color=color, linestyle='-.', linewidth=1.5, alpha=0.7, label=f"{task_name} (MTL)")
+        #     # Plot aligned with global epochs
+        #     if m_mask.any():
+        #         # Slice epochs_range in case MTL length differs slightly due to rounding
+        #         limit = min(len(epochs_range), len(m_acc_mean))
+        #         ax1.plot(epochs_range[:limit][m_mask[:limit]], m_acc_mean[:limit][m_mask[:limit]], 
+        #                  color=color, linestyle='-.', linewidth=1.5, alpha=0.7, label=f"{task_name} (MTL)")
                 
-                ax2.plot(epochs_range[:limit][m_mask[:limit]], m_loss_mean[:limit][m_mask[:limit]], 
-                         color=color, linestyle='-.', linewidth=1.5, alpha=0.7)
+        #         ax2.plot(epochs_range[:limit][m_mask[:limit]], m_loss_mean[:limit][m_mask[:limit]], 
+        #                  color=color, linestyle='-.', linewidth=1.5, alpha=0.7)
 
 
         acc = np.array(global_history['test_metrics'][task_name]['acc'])
