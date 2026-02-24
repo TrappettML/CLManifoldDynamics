@@ -1,7 +1,7 @@
 import ml_collections
 import os
 
-def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, dataset_name="imagenet_28_gray") -> ml_collections.ConfigDict:
+def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, num_tasks=2, dataset_name="imagenet_28_gray") -> ml_collections.ConfigDict:
     config = ml_collections.ConfigDict()
 
     # Store boolean flags
@@ -33,7 +33,7 @@ def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, 
     config.figures_dir = os.path.join("results", dataset_name, config.algorithm, "plots")
 
     # Task Configuration
-    config.num_tasks = 2
+    config.num_tasks = num_tasks
     
     # Model & Data
     config.input_dim = 28*28 # using imagenet downsampled to 28x28

@@ -58,6 +58,13 @@ def main():
         help="Train Using Unsupervised Learning -- Not yet implemented"
     )
 
+    parser.add_argument(
+        '--num_tasks',
+        type=int,
+        default=2,
+        help="Number of tasks for continual learning (up to 500 for ImageNet-1k)"
+    )
+
     args = parser.parse_args()
 
     # --- 2. Load Config ---
@@ -66,7 +73,8 @@ def main():
         args.algorithm,
         use_replay=args.use_replay,
         add_plasticity=args.add_plasticity,
-        use_ul=args.use_ul
+        use_ul=args.use_ul,
+        num_tasks=args.num_tasks
     )
     
     print(f"\n{'='*60}")
