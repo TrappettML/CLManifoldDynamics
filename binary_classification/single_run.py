@@ -46,6 +46,25 @@ def main():
         choices=['SL', 'RL'],
         help="Learning Algorithm"
     )
+    parser.add_argument(
+        '--use_replay',
+        type=bool,
+        default=False,
+        help="Use Experience Replay or Not"
+    )
+    parser.add_argument(
+        '--add_plasticity',
+        type=bool,
+        default=False,
+        help="Add Plasticity via ShrinkPertrub"
+    )
+    parser.add_argument(
+        '--use_ul',
+        type=bool,
+        default=False,
+        help="Train Using Unsupervised Learning -- Not yet implemented"
+    )
+
     args = parser.parse_args()
 
     # --- 2. Load Config ---

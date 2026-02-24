@@ -10,6 +10,8 @@ class TrainState(train_state.TrainState):
     """
     pass
 
+
+
 class TwoLayerMLP(nn.Module):
     """
     A simple two-layer MLP for binary classification.
@@ -70,6 +72,7 @@ class CNN(nn.Module):
         x = self.layer1(x)
         x = nn.relu(x)
         return x
+    
 
 class CLHook:
     """

@@ -9,18 +9,40 @@ class BaseAlgorithm:
     def __init__(self, config):
         self.config = config
 
-    def init_vectorized_state(self, rng: jax.Array, input_shape: int) -> TrainState:
-        raise NotImplementedError
+    def _build_optimizer(self, params):
+        """Shared logic for creating partitioned optimizers."""
+        partition_optimizers = {
+            'feature': optax.chain(
+                optax.add_decayed_weights(self.config.weight_decay),
+                optax.sgd(self.config.learning_rate1)
+            ),
+            'readout': optax.sgd(self.config.learning_rate2)
+        }
+        
+        param_partitions = traverse_util.path_aware_map(
+            lambda path, v: 'readout' if 'layer2' in path else 'feature', params
+        )
+        return optax.multi_transform(partition_optimizers, param_partitions)
 
-    def train_step(self, state: TrainState, batch: Tuple[jax.Array, jax.Array]) -> Tuple[TrainState, Tuple[jax.Array, jax.Array]]:
-        raise NotImplementedError
+    def eval_step(self, state: Any, batch: Tuple[jax.Array, jax.Array]) -> Tuple[jax.Array, jax.Array]:
+        """Shared evaluation logic (greedy accuracy proxy for RL)."""
+        images, labels = batch
+        logits = state.apply_fn({'params': state.params}, images)
+        loss = optax.sigmoid_binary_cross_entropy(logits, labels).mean()
+        preds = (logits > 0).astype(jnp.float32)
+        acc = jnp.mean(preds == labels)
+        return loss, acc
 
-    def eval_step(self, state: TrainState, batch: Tuple[jax.Array, jax.Array]) -> Tuple[jax.Array, jax.Array]:
-        raise NotImplementedError
-
-    def get_features(self, state: TrainState, x: jax.Array) -> jax.Array:
-        raise NotImplementedError
+    def get_features(self, state: Any, x: jax.Array) -> jax.Array:
+        """Shared feature extraction logic."""
+        return state.apply_fn({'params': state.params}, x, method=TwoLayerMLP.get_features)
     
+    def init_vectorized_state(self, rng: jax.Array, input_shape: int) -> Any:
+        raise NotImplementedError
+
+    def train_step(self, state: Any, batch: Tuple[jax.Array, jax.Array]) -> Tuple[Any, Tuple[jax.Array, jax.Array]]:
+        raise NotImplementedError
+
 
 class SupervisedLearning(BaseAlgorithm):
     def init_vectorized_state(self, rng: jax.Array, input_shape: int) -> TrainState:
@@ -30,19 +52,7 @@ class SupervisedLearning(BaseAlgorithm):
             dummy_input = jnp.ones((1, input_shape))
             variables = model.init(key, dummy_input)
             params = variables['params']
-            
-            partition_optimizers = {
-                'feature': optax.chain(
-                    optax.add_decayed_weights(self.config.weight_decay),
-                    optax.sgd(self.config.learning_rate1)
-                ),
-                'readout': optax.sgd(self.config.learning_rate2)
-            }
-            
-            param_partitions = traverse_util.path_aware_map(
-                lambda path, v: 'readout' if 'layer2' in path else 'feature', params
-            )
-            tx = optax.multi_transform(partition_optimizers, param_partitions)
+            tx = self._build_optimizer(params)
             
             return TrainState.create(apply_fn=model.apply, params=params, tx=tx)
 
@@ -66,17 +76,6 @@ class SupervisedLearning(BaseAlgorithm):
         
         return new_state, (loss, acc)
 
-    def eval_step(self, state: TrainState, batch: Tuple[jax.Array, jax.Array]):
-        images, labels = batch
-        logits = state.apply_fn({'params': state.params}, images)
-        loss = optax.sigmoid_binary_cross_entropy(logits, labels).mean()
-        preds = (logits > 0).astype(jnp.float32)
-        acc = jnp.mean(preds == labels)
-        return loss, acc
-
-    def get_features(self, state: TrainState, x: jax.Array):
-        return state.apply_fn({'params': state.params}, x, method=TwoLayerMLP.get_features)
-
 
 class RLTrainState(TrainState):
     rng: jax.Array
@@ -90,19 +89,7 @@ class ReinforcementLearning(BaseAlgorithm):
             dummy_input = jnp.ones((1, input_shape))
             variables = model.init(init_key, dummy_input)
             params = variables['params']
-            
-            partition_optimizers = {
-                'feature': optax.chain(
-                    optax.add_decayed_weights(self.config.weight_decay),
-                    optax.sgd(self.config.learning_rate1)
-                ),
-                'readout': optax.sgd(self.config.learning_rate2)
-            }
-            
-            param_partitions = traverse_util.path_aware_map(
-                lambda path, v: 'readout' if 'layer2' in path else 'feature', params
-            )
-            tx = optax.multi_transform(partition_optimizers, param_partitions)
+            tx = self._build_optimizer(params)
             
             return RLTrainState.create(apply_fn=model.apply, params=params, tx=tx, rng=state_key)
 
@@ -135,17 +122,6 @@ class ReinforcementLearning(BaseAlgorithm):
         acc = jnp.mean(greedy_preds == b_lbl)
         
         return new_state, (loss, acc)
-
-    def eval_step(self, state: RLTrainState, batch: Tuple[jax.Array, jax.Array]):
-        images, labels = batch
-        logits = state.apply_fn({'params': state.params}, images)
-        loss = optax.sigmoid_binary_cross_entropy(logits, labels).mean()
-        preds = (logits > 0).astype(jnp.float32)
-        acc = jnp.mean(preds == labels)
-        return loss, acc
-
-    def get_features(self, state: RLTrainState, x: jax.Array):
-        return state.apply_fn({'params': state.params}, x, method=TwoLayerMLP.get_features)
 
 
 def get_algorithm(config):
