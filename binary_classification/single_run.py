@@ -39,6 +39,7 @@ def main():
         choices=['kmnist', 'mnist', 'fashion_mnist', 'emnist'],
         help="Dataset to use"
     )
+    
     parser.add_argument(
         '--algorithm',
         type=str,
@@ -46,33 +47,39 @@ def main():
         choices=['SL', 'RL'],
         help="Learning Algorithm"
     )
+    # Swapped type=bool for action='store_true'
     parser.add_argument(
         '--use_replay',
-        type=bool,
-        default=False,
+        action='store_true',
         help="Use Experience Replay or Not"
     )
     parser.add_argument(
         '--add_plasticity',
-        type=bool,
-        default=False,
+        action='store_true',
         help="Add Plasticity via ShrinkPertrub"
     )
     parser.add_argument(
         '--use_ul',
-        type=bool,
-        default=False,
+        action='store_true',
         help="Train Using Unsupervised Learning -- Not yet implemented"
     )
 
     args = parser.parse_args()
 
     # --- 2. Load Config ---
-    config = config_module.get_config(args.dataset, args.algorithm)
+    # Pass the new arguments into the config builder
+    config = config_module.get_config(
+        args.dataset, 
+        args.algorithm,
+        use_replay=args.use_replay,
+        add_plasticity=args.add_plasticity,
+        use_ul=args.use_ul
+    )
     
     print(f"\n{'='*60}")
     print(f"Continual Learning Experiment")
     print(f"{'='*60}")
+    # The printed algorithm will now automatically reflect the new naming convention (e.g., SL_er)
     print(f"Algorithm: {config.algorithm}")
     print(f"Dataset: {config.dataset_name}")
     print(f"Device: {jax.devices()}")

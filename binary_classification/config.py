@@ -1,11 +1,25 @@
 import ml_collections
 import os
 
-def get_config(dataset_name, algorithm) -> ml_collections.ConfigDict:
+def get_config(dataset_name, algorithm, use_replay=False, add_plasticity=False, use_ul=False) -> ml_collections.ConfigDict:
     config = ml_collections.ConfigDict()
 
+    # Store boolean flags
+    config.use_replay = use_replay
+    config.add_plasticity = add_plasticity
+    config.use_ul = use_ul
+
+    # Construct the base algorithm name based on flags
+    algo_name = algorithm
+    if config.use_replay:
+        algo_name += "_er"
+    if config.add_plasticity:
+        algo_name += "_pl"
+    if config.use_ul:
+        algo_name += "_ul"
+
     # Algorithm & Dataset
-    config.algorithm = algorithm
+    config.algorithm = algo_name
     config.dataset_name = dataset_name
     config.seed = 42
     
@@ -13,10 +27,10 @@ def get_config(dataset_name, algorithm) -> ml_collections.ConfigDict:
     # Spec: results/{dataset}/{algorithm}/task_001/
     config.data_dir = "./data"  # PyTorch dataset cache
     config.results_root = "results"
-    config.results_dir = os.path.join("results", dataset_name, algorithm)
     
-    # Plots go in a separate directory for convenience
-    config.figures_dir = os.path.join("results", dataset_name, algorithm, "plots")
+    # These will now dynamically use the new appended algorithm name (e.g., SL_er_pl)
+    config.results_dir = os.path.join("results", dataset_name, config.algorithm)
+    config.figures_dir = os.path.join("results", dataset_name, config.algorithm, "plots")
 
     # Task Configuration
     config.num_tasks = 2
