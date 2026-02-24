@@ -1,7 +1,7 @@
 import ml_collections
 import os
 
-def get_config(dataset_name, algorithm, use_replay=False, add_plasticity=False, use_ul=False) -> ml_collections.ConfigDict:
+def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, dataset_name="imagenet_gray_28_") -> ml_collections.ConfigDict:
     config = ml_collections.ConfigDict()
 
     # Store boolean flags
@@ -19,7 +19,7 @@ def get_config(dataset_name, algorithm, use_replay=False, add_plasticity=False, 
         algo_name += "_ul"
 
     # Algorithm & Dataset
-    config.algorithm = algo_name
+    config.algorithm = algo_name + '_'
     config.dataset_name = dataset_name
     config.seed = 42
     

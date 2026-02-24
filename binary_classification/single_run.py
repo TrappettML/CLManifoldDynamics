@@ -33,14 +33,6 @@ def main():
     # --- 1. CLI Argument Parsing ---
     parser = argparse.ArgumentParser(description="Continual Learning Single Run")
     parser.add_argument(
-        '--dataset',
-        type=str,
-        default='mnist',
-        choices=['kmnist', 'mnist', 'fashion_mnist', 'emnist'],
-        help="Dataset to use"
-    )
-    
-    parser.add_argument(
         '--algorithm',
         type=str,
         default='SL',
