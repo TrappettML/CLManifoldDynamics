@@ -10,7 +10,7 @@ def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, 
     config.use_ul = use_ul
 
     # Construct the base algorithm name based on flags
-    algo_name = algorithm
+    algo_name = algorithm + f"_{num_tasks}_tasks"
     if config.use_replay:
         algo_name += "_er"
     if config.add_plasticity:

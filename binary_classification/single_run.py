@@ -207,14 +207,11 @@ def main():
         # L = logged epochs
         # Reshape Representations to match Spec: (L, Repeats, N_Eval_Tasks, N_Subsamples, Hidden_Dim)
         # rep_history.shape: (10, 2, 30, 400, 64)
-        # 
+        #  (L, train_tasks, repeats, samples in class1 + samples in class2, h_dim)
         if rep_history is not None:
-            L, n_Tasks, R, SxT_eval, H = rep_history.shape
-            T_eval = config.num_tasks
-            S = config.analysis_subsamples
-            
-            # Reshape logic: The samples were stacked [Task0, Task1...], so we split that dim
-            rep_reshaped = rep_history.reshape(L, R, T_eval, S, H)
+            L, n_Tasks, R, Samples, H = rep_history.shape
+            # need in shape: (L, R, T_eval, N_test, H)
+            rep_reshaped = np.swapaxes(rep_history, 1, 2)
             np.save(os.path.join(task_dir, "representations.npy"), rep_reshaped)
         
         if weight_history is not None:

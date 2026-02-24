@@ -125,9 +125,9 @@ class ReinforcementLearning(BaseAlgorithm):
 
 
 def get_algorithm(config):
-    if config.algorithm == 'SL':
+    if 'SL' in config.algorithm:
         return SupervisedLearning(config)
-    elif config.algorithm == 'RL':
+    elif 'RL' in config.algorithm:
         return ReinforcementLearning(config)
     else:
         raise ValueError(f"Unknown algorithm: {config.algorithm}")
