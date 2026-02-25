@@ -36,7 +36,8 @@ def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, 
     config.num_tasks = num_tasks
     
     # Model & Data
-    config.input_dim = 28*28 # using imagenet downsampled to 28x28
+    # config.input_dim = 28*28 # using imagenet downsampled to 28x28
+    config.input_side = 28 # switch to CNN
     config.hidden_dim = 64
     
     # Optimization

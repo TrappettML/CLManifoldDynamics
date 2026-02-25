@@ -4,6 +4,7 @@ import numpy as np
 from functools import partial
 from jax import flatten_util
 import algorithms
+from ipdb import set_trace
 
 
 class ContinualLearner:
@@ -14,20 +15,21 @@ class ContinualLearner:
         self.algo = algorithms.get_algorithm(config)
         
         rng = jax.random.key(config.seed)
-        self.state = self.algo.init_vectorized_state(rng, config.input_dim)
+        self.state = self.algo.init_vectorized_state(rng, config.input_side)
         
         self._flat_fn = lambda p: flatten_util.ravel_pytree(p)[0]
 
     def preload_data(self, data_source):
         """
         Optimized data loader.
-        Expects Canonical Format: (Total_Samples, Repeats, Dim)
+        Expects Canonical Format: (Total_Samples, Repeats, Side, Side)
         
         Args:
             data_source: Either a tuple (X, Y) or an object with get_full_data()
         
         Returns:
             (images, labels) in Canonical format
+    
         """
         # Fast path: Direct tuple
         if isinstance(data_source, tuple) and len(data_source) == 2:
@@ -59,7 +61,7 @@ class ContinualLearner:
         
         Args:
             state: Vectorized state (Repeats, ...)
-            batch_images: (Num_Batches, Repeats, Batch_Size, Dim)
+            batch_images: (Num_Batches, Repeats, Batch_Size, Side, Side)
             batch_labels: (Num_Batches, Repeats, Batch_Size, 1)
         
         Returns:
@@ -68,7 +70,7 @@ class ContinualLearner:
             mean_acc: (Repeats,) averaged over batches
         """
         def scan_fn(carry_state, batch_data):
-            imgs, lbls = batch_data  # (Repeats, Batch_Size, Dim)
+            imgs, lbls = batch_data  # (Repeats, Batch_Size, Side, Side)
             
             def parallel_update(s, i, l):
                 return self.algo.train_step(s, (i, l))
@@ -150,23 +152,24 @@ class ContinualLearner:
         for h in self.hooks:
             h.on_task_start(task, self.state)
 
-        # Load training data (Canonical: N, R, D)
+        # Load training data (Canonical: N, R, Side, Side)
         train_imgs, train_lbls = self.preload_data(task['data'])
         
-        # Prepare batches for scan: (Num_Batches, Repeats, Batch_Size, Dim)
+        # Prepare batches for scan: (Num_Batches, Repeats, Batch_Size, Side, Side)
+        # TODO: fix how this data is split up for training
         n_samples = train_imgs.shape[0]
         n_batches = n_samples // self.config.batch_size
         limit = n_batches * self.config.batch_size
-        
+        set_trace()
         # Truncate to divisible limit
         train_imgs = train_imgs[:limit]
         train_lbls = train_lbls[:limit]
         
-        # Reshape: (Limit, R, D) -> (Batches, Batch_Size, R, D) -> (Batches, R, Batch_Size, D)
-        train_imgs = train_imgs.reshape(n_batches, self.config.batch_size, self.config.n_repeats, -1)
+        # Reshape: (Limit, R, D) -> (Batches, Batch_Size, R, Side, Side) -> (Batches, R, Batch_Size, Side, Side)
+        train_imgs = train_imgs.reshape(n_batches, self.config.batch_size, self.config.n_repeats, self.config.input_side, self.config.input_side)
         train_lbls = train_lbls.reshape(n_batches, self.config.batch_size, self.config.n_repeats, -1)
         
-        # Transpose for efficient vmap: (Batches, R, Batch_Size, D)
+        # Transpose for efficient vmap: (Batches, R, Batch_Size, Side, Side)
         epoch_data_imgs = jnp.swapaxes(train_imgs, 1, 2)
         epoch_data_lbls = jnp.swapaxes(train_lbls, 1, 2)
         

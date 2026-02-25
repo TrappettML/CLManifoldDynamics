@@ -3,13 +3,14 @@ import matplotlib.pyplot as plt
 import os
 import jax.numpy as jnp
 import json
+from ipdb import set_trace
 
 # --- Configuration ---
 DATASET_CONFIGS = {
-    'imagenet_28_gray': {'input_dim': 784, 'num_classes': 1000, 'channels': 1}
+    'imagenet_28_gray': {'input_side': 28, 'num_classes': 1000, 'channels': 1}
 }
 
-def get_base_data_jax(dataset_name, root, train):
+def get_base_data_jax(dataset_name, root, config, train):
     """
     Loads pre-processed ImageNet dataset from .npy files and converts to JAX Arrays.
     
@@ -36,6 +37,10 @@ def get_base_data_jax(dataset_name, root, train):
     X_np = np.load(x_path)
     Y_np = np.load(y_path)
     
+    # reshape for CNN
+    n_samples = X_np.shape[0]
+    X_np = X_np.reshape((n_samples, config.input_side, config.input_side))
+
     # Convert directly to JAX
     X_jax = jnp.array(X_np)
     Y_jax = jnp.array(Y_np)
@@ -95,13 +100,13 @@ def create_single_task_data(task_idx, task_class_pairs, X_global, Y_global, conf
     Args:
         task_idx: Task index (0-based)
         task_class_pairs: Pre-computed pairs, shape (T, R, 2)
-        X_global: Global dataset images (N, Dim)
+        X_global: Global dataset images (N, Side, Side)
         Y_global: Global dataset labels (N,)
         config: Configuration object
         split: 'train' or 'test'
         
     Returns:
-        task_X: (N_samples, R, Dim) - Canonical format
+        task_X: (N_samples, R, Side, Side) - Canonical format
         task_Y: (N_samples, R, 1) - Binary labels {0, 1}
         task_name: String identifier
     """
@@ -147,7 +152,7 @@ def create_single_task_data(task_idx, task_class_pairs, X_global, Y_global, conf
     final_x_list = [x[:min_samples_in_task] for x, _ in repeat_data_cache]
     final_y_list = [y[:min_samples_in_task] for _, y in repeat_data_cache]
     
-    # Stack: (R, N, D) -> Transpose to Canonical: (N, R, D)
+    # Stack: (R, N, Side, Side) -> Transpose to Canonical: (N, R, Side, Side)
     task_X = jnp.stack(final_x_list, axis=0)
     task_Y = jnp.stack(final_y_list, axis=0)
     
@@ -256,7 +261,7 @@ def save_task_samples_grid(task_class_pairs, X_global, Y_global, config, output_
         )
         
         # Convert to numpy for easier indexing
-        task_X_np = np.array(task_X) # (N, R, Dim)
+        task_X_np = np.array(task_X) # (N, R, Side, Side)
         task_Y_np = np.array(task_Y) # (N, R, 1)
 
         for r in range(n_repeats):
@@ -282,9 +287,10 @@ def save_task_samples_grid(task_class_pairs, X_global, Y_global, config, output_
             col_idx_0 = t_idx * 2
             ax0 = axes[r, col_idx_0]
             
-            img0_flat = task_X_np[idx_0, r, :]
-            side = int(np.sqrt(img0_flat.shape[0]))
-            img0 = img0_flat.reshape(side, side)
+            # no longer flat
+            img0 = task_X_np[idx_0, r, :]
+            # side = int(np.sqrt(img0_flat.shape[0]))
+            # img0 = img0_flat.reshape(side, side)
             
             ax0.imshow(img0, cmap='gray')
             ax0.set_xlabel(f"True: {class_A}", fontsize=9)
@@ -293,8 +299,8 @@ def save_task_samples_grid(task_class_pairs, X_global, Y_global, config, output_
             col_idx_1 = t_idx * 2 + 1
             ax1 = axes[r, col_idx_1]
             
-            img1_flat = task_X_np[idx_1, r, :]
-            img1 = img1_flat.reshape(side, side)
+            img1 = task_X_np[idx_1, r, :]
+            # img1 = img1_flat.reshape(side, side)
             
             ax1.imshow(img1, cmap='gray')
             ax1.set_xlabel(f"True: {class_B}", fontsize=9)

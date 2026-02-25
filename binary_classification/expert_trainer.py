@@ -38,7 +38,7 @@ def train_single_expert(config, train_task, test_data):
     train_imgs = train_imgs[:limit]
     train_lbls = train_lbls[:limit]
     
-    # (Limit, R, D) -> (Batches, Batch_Size, R, D) -> (Batches, R, Batch_Size, D)
+    # (Limit, R, Side, Side) -> (Batches, Batch_Size, R, Side, Side) -> (Batches, R, Batch_Size, Side, Side)
     train_imgs_reshaped = train_imgs.reshape(
         n_batches, config.batch_size, config.n_repeats, -1
     )

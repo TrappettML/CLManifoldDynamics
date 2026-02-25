@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import optax
 from flax import traverse_util
-from models import TwoLayerMLP, TrainState
+from models import TwoLayerMLP, TrainState, CNN
 from typing import Tuple, Any
 
 class BaseAlgorithm:
@@ -20,13 +20,14 @@ class BaseAlgorithm:
         }
         
         param_partitions = traverse_util.path_aware_map(
-            lambda path, v: 'readout' if 'layer2' in path else 'feature', params
+            lambda path, v: 'readout' if 'classifier' in path else 'feature', params
         )
         return optax.multi_transform(partition_optimizers, param_partitions)
 
     def eval_step(self, state: Any, batch: Tuple[jax.Array, jax.Array]) -> Tuple[jax.Array, jax.Array]:
         """Shared evaluation logic (greedy accuracy proxy for RL)."""
         images, labels = batch
+        images = jnp.expand_dims(images, axis=-1)
         logits = state.apply_fn({'params': state.params}, images)
         loss = optax.sigmoid_binary_cross_entropy(logits, labels).mean()
         preds = (logits > 0).astype(jnp.float32)
@@ -35,9 +36,10 @@ class BaseAlgorithm:
 
     def get_features(self, state: Any, x: jax.Array) -> jax.Array:
         """Shared feature extraction logic."""
-        return state.apply_fn({'params': state.params}, x, method=TwoLayerMLP.get_features)
+        x = jnp.expand_dims(x, axis=-1)
+        return state.apply_fn({'params': state.params}, x, method=CNN.get_features)
     
-    def init_vectorized_state(self, rng: jax.Array, input_shape: int) -> Any:
+    def init_vectorized_state(self, rng: jax.Array, input_side: int) -> Any:
         raise NotImplementedError
 
     def train_step(self, state: Any, batch: Tuple[jax.Array, jax.Array]) -> Tuple[Any, Tuple[jax.Array, jax.Array]]:
@@ -45,11 +47,11 @@ class BaseAlgorithm:
 
 
 class SupervisedLearning(BaseAlgorithm):
-    def init_vectorized_state(self, rng: jax.Array, input_shape: int) -> TrainState:
-        model = TwoLayerMLP(hidden_dim=self.config.hidden_dim)
+    def init_vectorized_state(self, rng: jax.Array, input_side: int) -> TrainState:
+        model = CNN(hidden_dim=self.config.hidden_dim)
         
         def init_single_state(key):
-            dummy_input = jnp.ones((1, input_shape))
+            dummy_input = jnp.ones((1, input_side, input_side, 1)) # make sure to add channel
             variables = model.init(key, dummy_input)
             params = variables['params']
             tx = self._build_optimizer(params)
@@ -61,7 +63,8 @@ class SupervisedLearning(BaseAlgorithm):
 
     def train_step(self, state: TrainState, batch: Tuple[jax.Array, jax.Array]):
         b_img, b_lbl = batch
-        
+        b_img = jnp.expand_dims(b_img, axis=-1)
+
         def loss_fn(params):
             logits = state.apply_fn({'params': params}, b_img)
             loss = optax.sigmoid_binary_cross_entropy(logits, b_lbl).mean()
@@ -81,12 +84,12 @@ class RLTrainState(TrainState):
     rng: jax.Array
 
 class ReinforcementLearning(BaseAlgorithm):
-    def init_vectorized_state(self, rng: jax.Array, input_shape: int) -> RLTrainState:
-        model = TwoLayerMLP(hidden_dim=self.config.hidden_dim)
+    def init_vectorized_state(self, rng: jax.Array, input_side: int) -> RLTrainState:
+        model = CNN(hidden_dim=self.config.hidden_dim)
         
         def init_single_state(key):
             init_key, state_key = jax.random.split(key)
-            dummy_input = jnp.ones((1, input_shape))
+            dummy_input = jnp.ones((1, input_side, input_side, 1))
             variables = model.init(init_key, dummy_input)
             params = variables['params']
             tx = self._build_optimizer(params)
@@ -99,7 +102,7 @@ class ReinforcementLearning(BaseAlgorithm):
     def train_step(self, state: RLTrainState, batch: Tuple[jax.Array, jax.Array]):
         b_img, b_lbl = batch
         rng_next, key_sample = jax.random.split(state.rng)
-        
+        b_img = jnp.expand_dims(b_img, axis=-1)
         def loss_fn(params):
             logits = state.apply_fn({'params': params}, b_img)
             probs = jax.nn.sigmoid(logits)

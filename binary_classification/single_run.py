@@ -113,11 +113,13 @@ def main():
     X_train_global, Y_train_global = data_utils.get_base_data_jax(
         config.dataset_name,
         config.data_dir,
+        config,
         train=True,
     )
     X_test_global, Y_test_global = data_utils.get_base_data_jax(
         config.dataset_name,
         config.data_dir,
+        config,
         train=False,
     )
 
@@ -125,7 +127,7 @@ def main():
     test_data_dict = data_utils.preload_all_test_data(
         task_class_pairs, X_test_global, Y_test_global, config
     )
-
+    
     # --- 6. Visualize Tasks ---
     data_utils.save_task_samples_grid(
         task_class_pairs, X_train_global, Y_train_global, config
@@ -181,11 +183,10 @@ def main():
         task = {
             'id': task_idx,
             'name': task_name,
-            'data': (train_X, train_Y), # Canonical: (N, R, D)
+            'data': (train_X, train_Y), # Canonical: (N, R, Side, Side), (N,R,)
             'n_samples': train_X.shape[0]
         }
 
-        # TODO: convert to using test data
         # Save analysis labels (reshaped for clarity: Num_Tasks, Subsamples, R)
         task_dir = os.path.join(config.results_dir, task_name)
         os.makedirs(task_dir, exist_ok=True)
