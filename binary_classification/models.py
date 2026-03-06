@@ -35,9 +35,9 @@ class CNN(nn.Module):
         return x
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        x = self.get_features(x)
-        x = self.classifier(x)
-        return x
+        h = self.get_features(x)
+        x = self.classifier(h)
+        return x, h
 
 class TwoLayerMLP(nn.Module):
     """

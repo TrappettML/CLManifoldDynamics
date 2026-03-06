@@ -28,7 +28,7 @@ class BaseAlgorithm:
         """Shared evaluation logic (greedy accuracy proxy for RL)."""
         images, labels = batch
         images = jnp.expand_dims(images, axis=-1)
-        logits = state.apply_fn({'params': state.params}, images)
+        logits, h_reps = state.apply_fn({'params': state.params}, images)
         loss = optax.sigmoid_binary_cross_entropy(logits, labels).mean()
         preds = (logits > 0).astype(jnp.float32)
         acc = jnp.mean(preds == labels)
@@ -37,7 +37,7 @@ class BaseAlgorithm:
     def get_features(self, state: Any, x: jax.Array) -> jax.Array:
         """Shared feature extraction logic."""
         x = jnp.expand_dims(x, axis=-1)
-        return state.apply_fn({'params': state.params}, x, method=CNN.get_features)
+        return state.apply_fn({'params': state.params}, x, method=CNN.get_features)[0]
     
     def init_vectorized_state(self, rng: jax.Array, input_side: int) -> Any:
         raise NotImplementedError
@@ -66,7 +66,7 @@ class SupervisedLearning(BaseAlgorithm):
         b_img = jnp.expand_dims(b_img, axis=-1)
 
         def loss_fn(params):
-            logits = state.apply_fn({'params': params}, b_img)
+            logits, h_reps = state.apply_fn({'params': params}, b_img)
             loss = optax.sigmoid_binary_cross_entropy(logits, b_lbl).mean()
             return loss, logits
 
@@ -104,7 +104,7 @@ class ReinforcementLearning(BaseAlgorithm):
         rng_next, key_sample = jax.random.split(state.rng)
         b_img = jnp.expand_dims(b_img, axis=-1)
         def loss_fn(params):
-            logits = state.apply_fn({'params': params}, b_img)
+            logits, _ = state.apply_fn({'params': params}, b_img)
             probs = jax.nn.sigmoid(logits)
             
             u_rand = jax.random.uniform(key_sample, shape=logits.shape)
