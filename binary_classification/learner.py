@@ -109,32 +109,9 @@ class ContinualLearner:
         def eval_single(curr_state, curr_imgs, curr_lbls):
             return self.algo.eval_step(curr_state, (curr_imgs, curr_lbls))
         
-        def extract_single(curr_state, curr_imgs):
-            return self.algo.get_features(curr_state, curr_imgs)
-        
-        evals = jax.vmap(eval_single, in_axes=(0, 0, 0))(state, images_t, labels_t)
-        representations = jax.vmap(extract_single, in_axes=(0, 0))(state, images_t)
+        evals, representations = jax.vmap(eval_single, in_axes=(0, 0, 0))(state, images_t, labels_t)
         return evals, representations
 
-    @partial(jax.jit, static_argnums=(0,))
-    def _extract_features_jit(self, state, images):
-        """
-        Extracts hidden features from model.
-        
-        Args:
-            state: Vectorized state (Repeats, ...)
-            images: (Total_Samples, Repeats, Dim) - Canonical format
-        
-        Returns:
-            features: (Repeats, Total_Samples, Hidden_Dim)
-        """
-        # Transpose to (Repeats, Total_Samples, Dim) for vmap
-        images_t = jnp.swapaxes(images, 0, 1)
-        
-        def extract_single(curr_state, curr_imgs):
-            return self.algo.get_features(curr_state, curr_imgs)
-        
-        return jax.vmap(extract_single, in_axes=(0, 0))(state, images_t)
 
     def train_task(self, task, test_data_dict, global_history):
         """
@@ -160,7 +137,7 @@ class ContinualLearner:
         n_samples = train_imgs.shape[0]
         n_batches = n_samples // self.config.batch_size
         limit = n_batches * self.config.batch_size
-        set_trace()
+        # set_trace()
         # Truncate to divisible limit
         train_imgs = train_imgs[:limit]
         train_lbls = train_lbls[:limit]

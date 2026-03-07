@@ -40,7 +40,7 @@ def train_single_expert(config, train_task, test_data):
     
     # (Limit, R, Side, Side) -> (Batches, Batch_Size, R, Side, Side) -> (Batches, R, Batch_Size, Side, Side)
     train_imgs_reshaped = train_imgs.reshape(
-        n_batches, config.batch_size, config.n_repeats, -1
+        n_batches, config.batch_size, config.n_repeats, config.input_side, config.input_side
     )
     train_imgs_reshaped = jnp.swapaxes(train_imgs_reshaped, 1, 2)
     

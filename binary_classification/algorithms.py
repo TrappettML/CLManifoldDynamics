@@ -32,7 +32,7 @@ class BaseAlgorithm:
         loss = optax.sigmoid_binary_cross_entropy(logits, labels).mean()
         preds = (logits > 0).astype(jnp.float32)
         acc = jnp.mean(preds == labels)
-        return loss, acc
+        return (loss, acc), h_reps
 
     def get_features(self, state: Any, x: jax.Array) -> jax.Array:
         """Shared feature extraction logic."""
