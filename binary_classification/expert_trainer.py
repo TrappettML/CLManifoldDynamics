@@ -49,21 +49,38 @@ def train_single_expert(config, train_task, test_data):
     )
     train_lbls_reshaped = jnp.swapaxes(train_lbls_reshaped, 1, 2)
 
-    # JIT-compiled training loop
-    @jax.jit
+    # --- Multi-GPU Setup ---
+    num_devices = jax.local_device_count()
+    r_per_dev = config.n_repeats // num_devices
+
+    def shard_data(x, repeat_axis):
+        shape = list(x.shape)
+        shape[repeat_axis:repeat_axis+1] = [num_devices, r_per_dev]
+        reshaped = x.reshape(*shape)
+        return jnp.swapaxes(reshaped, 0, repeat_axis)
+
+    def unshard_data(x, r_axis):
+        x = jnp.moveaxis(x, 0, r_axis)
+        shape = list(x.shape)
+        shape[r_axis : r_axis + 2] = [shape[r_axis] * shape[r_axis + 1]]
+        return x.reshape(*shape)
+
+    # Shard inputs
+    sharded_state = jax.tree_util.tree_map(lambda x: shard_data(x, 0), learner.state)
+    sharded_t_imgs = shard_data(train_imgs_reshaped, 1)
+    sharded_t_lbls = shard_data(train_lbls_reshaped, 1)
+    sharded_test_i = shard_data(test_imgs, 1)
+    sharded_test_l = shard_data(test_lbls, 1)
+    # -----------------------
+
+    # Remove @jax.jit and accept explicit inputs
     def run_training_loop(state, t_imgs, t_lbls, test_i, test_l):
-        """
-        Scans over epochs, evaluating at log_frequency intervals.
-        """
         def epoch_step(carry, epoch_idx):
             curr_state = carry
-            
-            # Train one epoch
             new_state, train_losses, train_accs = learner._train_epoch_jit(
                 curr_state, t_imgs, t_lbls
             )
             
-            # Conditionally evaluate
             is_eval_step = ((epoch_idx + 1) % config.log_frequency == 0)
             
             def true_eval_fn(s):
@@ -79,33 +96,23 @@ def train_single_expert(config, train_task, test_data):
             test_losses, test_accs = jax.lax.cond(
                 is_eval_step, true_eval_fn, false_eval_fn, new_state
             )
-            
-            metrics = (train_losses, train_accs, test_losses, test_accs)
-            return new_state, metrics
+            return new_state, (train_losses, train_accs, test_losses, test_accs)
         
-        # Scan over all epochs
-        epochs_range = jnp.arange(config.epochs_per_task)
-        final_state, (tr_l, tr_a, te_l, te_a) = jax.lax.scan(
-            epoch_step, state, epochs_range
-        )
-        
-        return final_state, tr_l, tr_a, te_l, te_a
+        return jax.lax.scan(epoch_step, state, jnp.arange(config.epochs_per_task))
 
-    # Execute
-    print(f"  Compiling and training...")
-    final_state, tr_l, tr_a, te_l, te_a = run_training_loop(
-        learner.state,
-        train_imgs_reshaped,
-        train_lbls_reshaped,
-        test_imgs,
-        test_lbls
+    print(f"  Mapping expert loop across {num_devices} devices...")
+    pmap_loop = jax.pmap(run_training_loop, in_axes=(0, 0, 0, 0, 0))
+    
+    # Execute pmap
+    sharded_final, (s_tr_l, s_tr_a, s_te_l, s_te_a) = pmap_loop(
+        sharded_state, sharded_t_imgs, sharded_t_lbls, sharded_test_i, sharded_test_l
     )
     
-    # Convert to numpy
-    tr_l = np.array(tr_l)
-    tr_a = np.array(tr_a)
-    te_l = np.array(te_l)
-    te_a = np.array(te_a)
+    # Unshard outputs back to numpy formats
+    tr_l = np.array(unshard_data(s_tr_l, 1))
+    tr_a = np.array(unshard_data(s_tr_a, 1))
+    te_l = np.array(unshard_data(s_te_l, 1))
+    te_a = np.array(unshard_data(s_te_a, 1))
     
     # Compute final statistics
     final_losses = te_l[-1]  # Last evaluation

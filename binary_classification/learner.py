@@ -11,6 +11,16 @@ class ContinualLearner:
     def __init__(self, config, hooks=None):
         self.config = config
         self.hooks = hooks if hooks else []
+
+        # --- Multi-GPU Setup ---
+        self.num_devices = jax.local_device_count()
+        if self.config.n_repeats % self.num_devices != 0:
+            raise ValueError(
+                f"n_repeats ({self.config.n_repeats}) must be divisible "
+                f"by available GPUs ({self.num_devices})."
+            )
+        self.r_per_dev = self.config.n_repeats // self.num_devices
+        # -----------------------
         
         self.algo = algorithms.get_algorithm(config)
         
@@ -163,50 +173,54 @@ class ContinualLearner:
         
         test_data_jax = self.cached_test_data
 
-        @jax.jit
-        def nested_task_scan(initial_state):
-            """
-            Nested scan structure:
-            - Outer: Log intervals
-            - Inner: Training epochs within each interval
-            """
+        # --- Sharding Utilities for pmap ---
+        def shard_data(x, repeat_axis):
+            """Reshapes (..., R, ...) to (num_devices, ..., R // num_devices, ...)"""
+            shape = list(x.shape)
+            shape[repeat_axis:repeat_axis+1] = [self.num_devices, self.r_per_dev]
+            reshaped = x.reshape(*shape)
+            return jnp.swapaxes(reshaped, 0, repeat_axis)
+
+        def unshard_data(x, r_axis):
+            """Reverses sharding back to (..., R, ...)"""
+            x = jnp.moveaxis(x, 0, r_axis)
+            shape = list(x.shape)
+            shape[r_axis : r_axis + 2] = [shape[r_axis] * shape[r_axis + 1]]
+            return x.reshape(*shape)
+
+        # 1. Shard all inputs across devices
+        sharded_state = jax.tree_util.tree_map(lambda x: shard_data(x, 0), self.state)
+        sharded_imgs = shard_data(epoch_data_imgs, 1)
+        sharded_lbls = shard_data(epoch_data_lbls, 1)
+        sharded_test = jax.tree_util.tree_map(lambda x: shard_data(x, 1), test_data_jax)
+
+        # 2. Define the training loop WITHOUT @jax.jit (pmap replaces it)
+        # Note: All arguments here now process 'r_per_dev' instead of 'n_repeats'
+        def nested_task_scan(initial_state, e_imgs, e_lbls, t_data):
             log_freq = self.config.log_frequency
             total_epochs = self.config.epochs_per_task
             n_outer_steps = total_epochs // log_freq
             
             def inner_loop(carry, _):
-                """Trains for log_freq epochs."""
-                curr_state = carry
-                new_state, tr_loss, tr_acc = self._train_epoch_jit(
-                    curr_state, epoch_data_imgs, epoch_data_lbls
-                )
+                new_state, tr_loss, tr_acc = self._train_epoch_jit(carry, e_imgs, e_lbls)
                 return new_state, (tr_loss, tr_acc)
             
             def outer_step(carry, _):
-                """Runs inner loop, then evaluates and logs."""
                 state_start = carry
-                
-                # Train for log_freq epochs
                 state_end, (block_losses, block_accs) = jax.lax.scan(
                     inner_loop, state_start, None, length=log_freq
                 )
                 
-                # Evaluate on all test tasks
                 def run_eval(s):
-                    results = {}
-                    all_reps = []
-                    for t_name in sorted(test_data_jax.keys()):
-                        ti, tl = test_data_jax[t_name]
+                    results, all_reps = {}, []
+                    for t_name in sorted(t_data.keys()):
+                        ti, tl = t_data[t_name]
                         (l, a), reps = self._eval_jit(s, ti, tl)
                         results[t_name] = (l, a)
                         all_reps.append(reps)
-                    # stack reps as expeted of down stream processing
-                    all_reps = jnp.stack(all_reps)
-                    return results, all_reps
+                    return results, jnp.stack(all_reps)
                 
                 test_metrics_sparse, reps_sparse = run_eval(state_end)
-                
-                # Flatten weights
                 flat_w = self.get_flat_params(state_end)
                 
                 metrics = {
@@ -216,18 +230,34 @@ class ContinualLearner:
                     'weights': flat_w,
                     'reps': reps_sparse
                 }
-                
                 return state_end, metrics
             
-            # Run outer scan
-            outer_range = jnp.arange(n_outer_steps)
-            final_state, history = jax.lax.scan(outer_step, initial_state, outer_range)
-            
-            return final_state, history
+            return jax.lax.scan(outer_step, initial_state, jnp.arange(n_outer_steps))
         
-        # Execute training
-        print(f"  Compiling and running nested scan...")
-        self.state, history_tree = nested_task_scan(self.state)
+        # 3. Apply pmap and execute
+        print(f"  Mapping scan across {self.num_devices} devices...")
+        pmap_scan = jax.pmap(nested_task_scan, in_axes=(0, 0, 0, 0))
+        sharded_final_state, sharded_history = pmap_scan(
+            sharded_state, sharded_imgs, sharded_lbls, sharded_test
+        )
+        
+        # 4. Unshard back to normal shapes for the rest of your pipeline
+        self.state = jax.tree_util.tree_map(lambda x: unshard_data(x, 0), sharded_final_state)
+        
+        # history_tree needs manual unsharding based on where the repeat axis ended up
+        history_tree = {
+            'tr_loss': unshard_data(sharded_history['tr_loss'], 2),
+            'tr_acc': unshard_data(sharded_history['tr_acc'], 2),
+            'weights': unshard_data(sharded_history['weights'], 1),
+            'reps': unshard_data(sharded_history['reps'], 2),
+            'test': {}
+        }
+        for t_name in sharded_history['test']:
+            history_tree['test'][t_name] = (
+                unshard_data(sharded_history['test'][t_name][0], 1),
+                unshard_data(sharded_history['test'][t_name][1], 1)
+            )
+        
         
         # Post-processing: Convert to numpy and format
         history_np = jax.tree_util.tree_map(np.array, history_tree)

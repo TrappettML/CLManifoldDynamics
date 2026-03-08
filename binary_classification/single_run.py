@@ -314,24 +314,39 @@ def main():
         'axes.labelsize': 13,
         'xtick.labelsize': 11,
         'ytick.labelsize': 11,
-        'legend.fontsize': 10,
+        'legend.fontsize': 10, 
         'lines.linewidth': 2
     })
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
     
     epochs_range = np.arange(1, total_epochs + 1)
     task_names = [f"task_{t:03d}" for t in range(config.num_tasks)]
     
-    cmap = plt.get_cmap('tab10')
-    color_dict = {name: cmap(i % 10) for i, name in enumerate(task_names)}
+    # 1. DYNAMIC COLORMAPS
+    if config.num_tasks <= 10:
+        cmap = plt.get_cmap('tab10')
+        color_dict = {name: cmap(i) for i, name in enumerate(task_names)}
+    elif config.num_tasks <= 20:
+        cmap = plt.get_cmap('tab20')
+        color_dict = {name: cmap(i) for i, name in enumerate(task_names)}
+    else:
+        cmap = plt.get_cmap('viridis')
+        color_dict = {name: cmap(i / max(1, config.num_tasks - 1)) for i, name in enumerate(task_names)}
+
+    # Determine downsampling step to keep plots clean for many tasks
+    plot_step = 5 if config.num_tasks >= 10 else 1
 
     def setup_axis(ax, ylabel):
         ax.grid(True, linestyle='--', alpha=0.4)
         ax.set_ylabel(ylabel, fontweight='bold')
+        
+        # 2. SMART BOUNDARY LABELS
+        label_step = 1 if config.num_tasks <= 10 else max(1, config.num_tasks // 10)
+        
         for i, boundary in enumerate(task_boundaries[:-1]):
             ax.axvline(x=boundary, color='#333333', linestyle='-', alpha=0.3, linewidth=1.5)
-            if i < len(task_names) - 1:
+            if (i < len(task_names) - 1) and (i % label_step == 0):
                 ax.text(boundary + (total_epochs*0.01), ax.get_ylim()[0], f"T{i+1}",
                         rotation=90, verticalalignment='bottom', fontsize=9, color='#555555')
 
@@ -341,9 +356,9 @@ def main():
         train_acc = train_acc.reshape(-1, config.n_repeats)
     
     train_mean = np.mean(train_acc, axis=1)
-    ax1.plot(epochs_range, train_mean, label='Current Task', color='grey', linestyle='-', alpha=0.3)
+    ax1.plot(epochs_range[::plot_step], train_mean[::plot_step], label='Current Task', color='grey', linestyle='-', alpha=0.3)
     
-    # --- Load Baseline Metrics ---
+    # Load Baseline Metrics
     mtl_path = os.path.join(config.results_dir, "multitask", "metrics.pkl")
     rand_path = os.path.join(config.results_dir, "random", "metrics.pkl")
     
@@ -357,46 +372,14 @@ def main():
         with open(rand_path, 'rb') as f:
             rand_history = pickle.load(f)
 
-
     for task_name in task_names:
         color = color_dict[task_name]
         
-        # --- Plot Random Baseline (Horizontal Dotted Line) ---
         if rand_history and task_name in rand_history['acc']:
             r_acc = rand_history['acc'][task_name]
             r_loss = rand_history['loss'][task_name]
-            
-            # Plot scalar mean across repeats
             ax1.axhline(y=np.nanmean(r_acc), color=color, linestyle=':', alpha=0.5, linewidth=1.5)
             ax2.axhline(y=np.nanmean(r_loss), color=color, linestyle=':', alpha=0.5, linewidth=1.5)
-
-        # # --- Plot Multi-Task Baseline (Dash-Dot Curve) ---
-        # if mtl_history and task_name in mtl_history['test_metrics']:
-        #     m_acc = np.array(mtl_history['test_metrics'][task_name]['acc'])
-        #     m_loss = np.array(mtl_history['test_metrics'][task_name]['loss'])
-            
-        #     # Ensure 2D (Epochs, Repeats)
-        #     if m_acc.ndim == 1: m_acc = m_acc.reshape(-1, config.n_repeats)
-        #     if m_loss.ndim == 1: m_loss = m_loss.reshape(-1, config.n_repeats)
-
-        #     with warnings.catch_warnings():
-        #         warnings.simplefilter("ignore", category=RuntimeWarning)
-        #         m_acc_mean = np.nanmean(m_acc, axis=1)
-        #         m_loss_mean = np.nanmean(m_loss, axis=1)
-
-        #     # Mask NaNs (sparse logging)
-        #     m_mask = ~np.isnan(m_acc_mean)
-            
-        #     # Plot aligned with global epochs
-        #     if m_mask.any():
-        #         # Slice epochs_range in case MTL length differs slightly due to rounding
-        #         limit = min(len(epochs_range), len(m_acc_mean))
-        #         ax1.plot(epochs_range[:limit][m_mask[:limit]], m_acc_mean[:limit][m_mask[:limit]], 
-        #                  color=color, linestyle='-.', linewidth=1.5, alpha=0.7, label=f"{task_name} (MTL)")
-                
-        #         ax2.plot(epochs_range[:limit][m_mask[:limit]], m_loss_mean[:limit][m_mask[:limit]], 
-        #                  color=color, linestyle='-.', linewidth=1.5, alpha=0.7)
-
 
         acc = np.array(global_history['test_metrics'][task_name]['acc'])
         if acc.ndim == 1:
@@ -409,8 +392,11 @@ def main():
         
         mask = ~np.isnan(mean)
         if mask.any():
-            ax1.plot(epochs_range[mask], mean[mask], label=f"{task_name} (CL)", color=color, linewidth=2.5)
-            ax1.fill_between(epochs_range[mask], mean[mask] - std[mask], mean[mask] + std[mask], color=color, alpha=0.1)
+            ax1.plot(epochs_range[mask][::plot_step], mean[mask][::plot_step], label=f"{task_name} (CL)", color=color, linewidth=2.5)
+            ax1.fill_between(epochs_range[mask][::plot_step], 
+                             mean[mask][::plot_step] - std[mask][::plot_step], 
+                             mean[mask][::plot_step] + std[mask][::plot_step], 
+                             color=color, alpha=0.1)
         
         if task_name in expert_stats:
             task_idx = task_names.index(task_name)
@@ -419,20 +405,39 @@ def main():
             emean = expert_stats[task_name]['acc_mean']
             emask = ~np.isnan(emean)
             if emask.any():
-                ax1.plot(expert_x[emask], emean[emask], color=color, linestyle='--', linewidth=2.0, alpha=0.9, label=f"{task_name} (Expert)")
+                ax1.plot(expert_x[emask][::plot_step], emean[emask][::plot_step], color=color, linestyle='--', linewidth=2.0, alpha=0.9, label=f"{task_name} (Expert)")
 
     setup_axis(ax1, 'Accuracy')
     ax1.set_ylim(-0.05, 1.05)
+    
+    # 3. LEGEND FILTERING & TRUNCATION
     handles, labels = ax1.get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    ax1.legend(by_label.values(), by_label.keys(), loc='center left', bbox_to_anchor=(1.02, 0.5))
+    
+    # Preserve order and avoid duplicates
+    by_label = {}
+    for handle, label in zip(handles, labels):
+        if label not in by_label:
+            by_label[label] = handle
+
+    # Only show the first 5 tasks if we have 10 or more
+    if config.num_tasks >= 10:
+        allowed_prefixes = tuple([f"task_{t:03d}" for t in range(5)] + ["Current Task"])
+        filtered_by_label = {k: v for k, v in by_label.items() if k.startswith(allowed_prefixes)}
+    else:
+        filtered_by_label = by_label
+    
+    num_legend_items = len(filtered_by_label)
+    legend_cols = 1 if num_legend_items <= 12 else 2
+    
+    ax1.legend(filtered_by_label.values(), filtered_by_label.keys(), loc='center left', 
+               bbox_to_anchor=(1.02, 0.5), ncol=legend_cols)
 
     # Plot Loss
     train_loss = np.array(global_history['train_loss'])
     if train_loss.ndim == 1:
         train_loss = train_loss.reshape(-1, config.n_repeats)
     loss_mean = np.mean(train_loss, axis=1)
-    ax2.plot(epochs_range, loss_mean, label='Current Task', color='grey', linestyle='-', alpha=0.3)
+    ax2.plot(epochs_range[::plot_step], loss_mean[::plot_step], label='Current Task', color='grey', linestyle='-', alpha=0.3)
     
     for task_name in task_names:
         color = color_dict[task_name]
@@ -446,7 +451,7 @@ def main():
         
         mask = ~np.isnan(mean)
         if mask.any():
-            ax2.plot(epochs_range[mask], mean[mask], label=task_name, color=color, linewidth=2.5)
+            ax2.plot(epochs_range[mask][::plot_step], mean[mask][::plot_step], label=task_name, color=color, linewidth=2.5)
         
         if task_name in expert_stats:
             task_idx = task_names.index(task_name)
@@ -455,11 +460,13 @@ def main():
             emean = expert_stats[task_name]['loss_mean']
             emask = ~np.isnan(emean)
             if emask.any():
-                ax2.plot(expert_x[emask], emean[emask], color=color, linestyle='--', linewidth=2.0, alpha=0.9)
+                ax2.plot(expert_x[emask][::plot_step], emean[emask][::plot_step], color=color, linestyle='--', linewidth=2.0, alpha=0.9)
 
     setup_axis(ax2, 'Loss')
     ax2.set_xlabel('Epochs', fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 0.82, 1])
+    
+    layout_right = 0.82 if legend_cols == 1 else 0.70
+    plt.tight_layout(rect=[0, 0, layout_right, 1])
     
     plot_path = os.path.join(config.figures_dir, f'{config.algorithm}_{config.dataset_name}_{config.num_tasks}tasks.png')
     plt.savefig(plot_path, dpi=150)

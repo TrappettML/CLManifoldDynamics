@@ -41,15 +41,15 @@ def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, 
     config.hidden_dim = 64
     
     # Optimization
-    config.learning_rate1 = 1e-4  # Feature layers
-    config.learning_rate2 = 1e-2  # Readout layer
+    config.learning_rate1 = 1e-2  # Feature layers
+    config.learning_rate2 = 1e-4  # Readout layer
     config.batch_size = 128
     config.weight_decay = 0.0
     
     # Training Schedule
     config.epochs_per_task = 1000
     config.log_frequency = 10
-    config.n_repeats = 30
+    config.n_repeats = 32
     
     if config.epochs_per_task % config.log_frequency != 0:
         raise ValueError("epochs_per_task must be divisible by log_frequency")
