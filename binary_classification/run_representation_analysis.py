@@ -159,7 +159,7 @@ def run_glue_analysis_pipeline(config):
         
         full_results[train_task_name] = {}
 
-        for eval_task_idx in get_pow2_indices(T_eval):
+        for eval_task_idx in [0,2,10]:
             eval_task_name = f"task_{eval_task_idx:03d}"
             full_results[train_task_name][eval_task_name] = {m: [] for m in metric_names}
             
