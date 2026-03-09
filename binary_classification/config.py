@@ -1,7 +1,15 @@
 import ml_collections
 import os
 
-def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, num_tasks=2, dataset_name="imagenet_28_gray") -> ml_collections.ConfigDict:
+def get_config(algorithm, 
+                use_replay=False, 
+                add_plasticity=False, 
+                use_ul=False, 
+                num_tasks=2, 
+                dataset_name="imagenet_28_gray", 
+                lr1=1e-2, 
+                lr2=1e-4
+                ) -> ml_collections.ConfigDict:
     config = ml_collections.ConfigDict()
 
     # Store boolean flags
@@ -17,6 +25,8 @@ def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, 
         algo_name += "_pl"
     if config.use_ul:
         algo_name += "_ul"
+
+    algo_name += f"_lr1_{lr1}_lr2_{lr2}"
 
     # Algorithm & Dataset
     config.algorithm = algo_name
@@ -41,8 +51,8 @@ def get_config(algorithm, use_replay=False, add_plasticity=False, use_ul=False, 
     config.hidden_dim = 64
     
     # Optimization
-    config.learning_rate1 = 1e-2  # Feature layers
-    config.learning_rate2 = 1e-4  # Readout layer
+    config.learning_rate1 = lr1  # features lr
+    config.learning_rate2 = lr2  # classifier readout
     config.batch_size = 128
     config.weight_decay = 0.0
     

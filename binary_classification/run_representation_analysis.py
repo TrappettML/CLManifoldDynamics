@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 
 import argparse
 from tqdm import tqdm # type: ignore
-import os
 import pickle
 import jax
 import jax.numpy as jnp
@@ -35,57 +34,42 @@ def _prep_glue_batch(reps_batch, labels_batch, P, M, H):
     for r in range(R):
         for p in range(P):
             # Extract points for class p
-            # Note: labels are 0.0/1.0 floats or ints
             idxs = np.where(labels_batch[r] == p)[0]
             points = reps_batch[r, idxs, :]
             
             count = len(points)
             if count == 0:
-                # Fallback for empty class (rare but possible in small subsamples)
-                # Fill with zeros or random noise to prevent crash, though GLUE will be junk
                 formatted[r, p, :, :] = np.random.randn(M, H) * 1e-4
             elif count >= M:
                 formatted[r, p, :, :] = points[:M, :]
             else:
-                # If we have fewer points than M, tile them to fill M
-                # This satisfies the shape requirement for the solver
                 repeats = (M // count) + 1
                 tiled = np.tile(points, (repeats, 1))
                 formatted[r, p, :, :] = tiled[:M, :]
                 
     return formatted
 
+
 def run_glue_analysis_pipeline(config):
-    print("\n--- Starting GLUE Metric Analysis (Batched VMAP) ---", flush=True)
+    print("\n--- Starting GLUE Metric Analysis (PMAP) ---", flush=True)
     
-    # Metrics map 
     metric_names = [
         'Capacity', 'Dimension', 'Radius', 
         'Center Alignment', 'Axis Alignment', 'Center-Axis Alignment', 
         'Approx Capacity'
     ]
     
-    # Constants
     P = 2 
     M = config.analysis_subsamples 
     N = config.hidden_dim
     n_t = config.n_t
     
-    # Initialize Solver
-    qp = OSQP(tol=1e-4)
-
-    # --- 1. JIT-Compiled Compute Step ---
-    vmapped_glue_step = jax.jit(jax.vmap(
-        partial(run_glue_solver, P=P, M=M, N=N, n_t=n_t, qp_solver=qp),
-        in_axes=(0, 0)
-    ))
-    
-    # Main Results Storage
-    full_results = {}
     master_key = jax.random.PRNGKey(config.seed)
-    
-    # Set a safe batch size for repeats to avoid OOM
-    repeats_batch_size = getattr(config, 'glue_batch_size', 5)
+    all_devices = jax.devices()
+    num_devices = len(all_devices)
+    print(f"Available JAX devices for PMAP: {num_devices}")
+
+    full_results = {}
 
     # --- 2. Process Training Tasks ---
     for train_task_idx in range(config.num_tasks):
@@ -102,60 +86,72 @@ def run_glue_analysis_pipeline(config):
         print(f"Processing Training Phase: {train_task_name}...")
         
         # Load Data
-        reps_data = np.load(reps_path) # (L, R, T_eval, S, H)
-        lbls_data = np.load(lbls_path) # (R, T_eval, S)
+        reps_data = np.load(reps_path, allow_pickle=True) # (L, R, T_eval, S, H)
+        lbls_data = np.load(lbls_path, allow_pickle=True) # (R, T_eval, S)
         
-        L, R, T_eval, S, H = reps_data.shape
+        L, R_original, T_eval, S, H = reps_data.shape
+        
+        # Determine strict device mapping for this batch
+        R = min(R_original, num_devices)
+        if R_original > num_devices:
+            print(f"  Truncating repeats from {R_original} -> {R} to match device count.")
+            
+        # Select the exact devices we are mapping to
+        active_devices = all_devices[:R]
+        
+        # --- 1. JIT-Compiled Compute Step (Strict Multi-GPU) ---
+        # Initialize OSQP *inside* the mapped function so each GPU owns its solver
+        def compute_glue_single(key, data):
+            local_qp = OSQP(tol=1e-4)
+            return run_glue_solver(key, data, P=P, M=M, N=N, n_t=n_t, qp_solver=local_qp)
+            
+        pmapped_glue_step = jax.pmap(
+            compute_glue_single,
+            in_axes=(0, 0),
+            devices=active_devices
+        )
+
+        reps_data = reps_data[:, :R, ...]
+        lbls_data = lbls_data[:R, ...]
+        
         full_results[train_task_name] = {}
 
-        # Iterate over Evaluated Tasks
         for eval_task_idx in range(T_eval):
             eval_task_name = f"task_{eval_task_idx:03d}"
             full_results[train_task_name][eval_task_name] = {m: [] for m in metric_names}
             
-            # Extract labels (constant across time L)
             current_eval_lbls = lbls_data[:, eval_task_idx, :] # (R, S)
             
-            # Iterate Time Steps
             for step in tqdm(range(L), desc=f"  {eval_task_name}", leave=False):
                 current_reps = reps_data[step, :, eval_task_idx, :, :] # (R, S, H)
                 formatted_data = _prep_glue_batch(current_reps, current_eval_lbls, P, M, H) 
                 
-                # Keys
                 step_key = jax.random.fold_in(master_key, train_task_idx * 10000 + step)
                 batch_keys = jax.random.split(step_key, R)
                 
-                # Temporary storage for this specific time step
-                step_results = [[] for _ in range(len(metric_names))]
-
-                # --- Batched VMAP execution ---
-                for b_start in range(0, R, repeats_batch_size):
-                    b_end = min(b_start + repeats_batch_size, R)
-                    batch_data = formatted_data[b_start:b_end]
-                    batch_keys_chunk = batch_keys[b_start:b_end]
-                    
-                    metrics_tuple_vmap, _, _ = vmapped_glue_step(batch_keys_chunk, batch_data)
-                    
-                    for i, name in enumerate(metric_names):
-                        step_results[i].append(np.array(metrics_tuple_vmap[i]))
-
-                # --- Concatenate and Store ---
+                # --- PMAP execution strictly forced across active devices ---
+                metrics_tuple_pmap = pmapped_glue_step(batch_keys, formatted_data)
+                
+                # metrics_tuple_pmap is returned as a tuple of arrays. 
+                # Each array is shape (R, ...) 
                 for i, name in enumerate(metric_names):
-                    # Combine the chunked results back into a single array of length R
-                    full_metric_array = np.concatenate(step_results[i], axis=0)
-                    full_results[train_task_name][eval_task_name][name].append(full_metric_array)
-                    
-            # --- CRITICAL: STACK LISTS INTO ARRAYS ---
-            # The plotting function expects (Steps, Repeats) arrays, not lists.
+                    # Handle the unpack based on whether run_glue_solver returns just the metrics tuple 
+                    # or (metrics, state, extra). Assuming it returns a tuple of metrics.
+                    # Note: You might need metrics_tuple_pmap[0][i] if your previous code unpacked it as metrics_tuple_pmap, _, _
+                    # Adjust this index dynamically based on your glue_solver return shape.
+                    if isinstance(metrics_tuple_pmap, tuple) and len(metrics_tuple_pmap) == 3:
+                        metric_val = metrics_tuple_pmap[0][i]
+                    else:
+                        metric_val = metrics_tuple_pmap[i]
+                        
+                    full_results[train_task_name][eval_task_name][name].append(np.array(metric_val))
+
+            # Stack lists into arrays -> (Steps, Repeats)
             for name in metric_names:
                 full_results[train_task_name][eval_task_name][name] = np.stack(
                     full_results[train_task_name][eval_task_name][name], 
                     axis=0
                 )
-            
-            # # ---> FORCE MEMORY CLEANUP <---
-            # jax.clear_caches()
-            # gc.collect()
 
     # --- 3. Save Results ---
     save_path = os.path.join(config.results_dir, "glue_metrics.pkl")
@@ -168,10 +164,6 @@ def run_glue_analysis_pipeline(config):
 
 
 def _plot_glue_results(full_results, metric_names, config):
-    """
-    Plots the trajectory of GLUE metrics for the CURRENT task and ALL tasks.
-    Aggregates data across the training timeline.
-    """
     if not full_results:
         return
 
@@ -179,55 +171,39 @@ def _plot_glue_results(full_results, metric_names, config):
     fig, axes = plt.subplots(n_metrics, 1, figsize=(12, 3 * n_metrics), sharex=True)
     if n_metrics == 1: axes = [axes]
     
-    # Flatten the timeline across training tasks
-    # We assume sequential training: task_0 -> task_1 -> ...
     train_tasks = sorted(list(full_results.keys()))
-    
-    # Build a continuous timeline dictionary
-    # timeline[metric][eval_task] = [ (mean, std) array over all time ]
     timeline = {m: {t: {'mean': [], 'std': []} for t in train_tasks} for m in metric_names}
     
     task_boundaries = []
     current_x = 0
     
     for t_train in train_tasks:
-        # Get one metric to determine length
         steps = full_results[t_train][t_train]['Capacity'].shape[0]
-        
-        # Determine X axis for this segment
         epochs_per_step = config.log_frequency
         segment_len = steps * epochs_per_step
         
         current_x += segment_len
         task_boundaries.append(current_x)
         
-        # Collect data for all eval tasks during this training phase
-        # Note: We plot all eval tasks available
         for t_eval in train_tasks:
             if t_eval not in full_results[t_train]:
                 continue
                 
             for m in metric_names:
-                # Data: (Steps, Repeats)
                 data = full_results[t_train][t_eval][m]
-                
-                # NanMean/Std over Repeats
                 mean = np.nanmean(data, axis=1)
                 std = np.nanstd(data, axis=1)
                 
                 timeline[m][t_eval]['mean'].append(mean)
                 timeline[m][t_eval]['std'].append(std)
 
-    # Stitch and Plot
     x_axis = np.arange(0, current_x, config.log_frequency)
-    
     colors = plt.cm.tab10(np.linspace(0, 1, len(train_tasks)))
     
     for i, metric in enumerate(metric_names):
         ax = axes[i]
         
         for j, t_eval in enumerate(train_tasks):
-            # Concatenate segments
             means = timeline[metric][t_eval]['mean']
             stds = timeline[metric][t_eval]['std']
             
@@ -236,7 +212,6 @@ def _plot_glue_results(full_results, metric_names, config):
             full_mean = np.concatenate(means)
             full_std = np.concatenate(stds)
             
-            # Ensure lengths match (handle potential slight mismatches in log freq)
             limit = min(len(x_axis), len(full_mean))
             
             ax.plot(x_axis[:limit], full_mean[:limit], label=t_eval, color=colors[j], linewidth=2)
@@ -248,7 +223,6 @@ def _plot_glue_results(full_results, metric_names, config):
         ax.set_ylabel(metric)
         ax.grid(True, alpha=0.3)
         
-        # Task Boundaries
         for boundary in task_boundaries[:-1]:
             ax.axvline(x=boundary, color='black', linestyle='--', alpha=0.5, linewidth=1.5)
 
@@ -264,206 +238,13 @@ def _plot_glue_results(full_results, metric_names, config):
     print(f"GLUE plots saved to {save_path}")
 
 
-def run_mtl_plasticity_analysis(config):
-    print("\n--- Running MTL Plasticity Analysis ---")
-    mtl_dir = os.path.join(config.results_dir, "multitask")
-    
-    # Load Data
-    reps = np.load(os.path.join(mtl_dir, "representations.npy")) # (L, R, T, S, H)
-    weights = np.load(os.path.join(mtl_dir, "weights.npy"))      # (L, R, D)
-    init_weights = weights[0] # Approx init
-    
-    # Flatten T and S for global plasticity metrics
-    # (L, R, T, S, H) -> (L, R, T*S, H)
-    L, R, T, S, H = reps.shape
-    reps_flat = reps.reshape(L, R, T*S, H)
-    
-    history = {
-        'Dormant Neurons (Ratio)': [], 
-        'Active Units (Fraction)': [], 
-        'Feature Norm': [],
-        'Weight Magnitude': [],
-        'Weight Difference (Init)': []
-    }
-    
-    # Compute Metrics
-    for i in range(L):
-        # Rep Metrics
-        r_met = _compute_rep_metrics_batch(jnp.array(reps_flat[i]), H)
-        history['Dormant Neurons (Ratio)'].append(np.array(r_met['Dormant Neurons (Ratio)']))
-        history['Active Units (Fraction)'].append(np.array(r_met['Active Units (Fraction)']))
-        history['Feature Norm'].append(np.array(r_met['Feature Norm']))
-        
-        # Weight Metrics
-        w_met = _compute_weight_metrics_batch(jnp.array(weights[i]), jnp.array(weights[i]), jnp.array(init_weights))
-        history['Weight Magnitude'].append(np.array(w_met['Weight Magnitude']))
-        history['Weight Difference (Init)'].append(np.array(w_met['Weight Difference (Init)']))
-
-    # Save
-    for k in history: history[k] = np.stack(history[k])
-    
-    with open(os.path.join(mtl_dir, "plasticity_metrics.pkl"), 'wb') as f:
-        pickle.dump(history, f)
-        
-    # Plot
-    _plot_mtl_metrics(history, config, "Plasticity", "mtl_plasticity.png")
-
-
-def run_mtl_cl_metrics(config):
-    print("\n--- Running MTL CL/Performance Analysis ---")
-    mtl_dir = os.path.join(config.results_dir, "multitask")
-    with open(os.path.join(mtl_dir, "metrics.pkl"), 'rb') as f:
-        history = pickle.load(f)
-        
-    print("\nFinal Multi-Task Performance:")
-    avg_accs = []
-    
-    # Print per-task final accuracy
-    for t_name, metrics in history['test_metrics'].items():
-        acc = np.array(metrics['acc']) # (Epochs, Repeats)
-        final_acc = acc[-1, :]
-        mean = np.mean(final_acc)
-        std = np.std(final_acc)
-        print(f"  {t_name}: {mean:.4f} ± {std:.4f}")
-        avg_accs.append(mean)
-        
-    print(f"  AVERAGE: {np.mean(avg_accs):.4f}")
-
-
-def _plot_mtl_metrics(data_dict, config, title_prefix, filename):
-    keys = list(data_dict.keys())
-    fig, axes = plt.subplots(len(keys), 1, figsize=(10, 3*len(keys)), sharex=True)
-    if len(keys) == 1: axes = [axes]
-    
-    # X-axis scaling
-    total_epochs = config.epochs_per_task * config.num_tasks
-    n_steps = list(data_dict.values())[0].shape[0]
-    x_axis = np.linspace(0, total_epochs, n_steps)
-    
-    for i, k in enumerate(keys):
-        vals = data_dict[k] # (L, R)
-        mean = np.mean(vals, axis=1)
-        std = np.std(vals, axis=1)
-        
-        axes[i].plot(x_axis, mean, label=k, color='purple')
-        axes[i].fill_between(x_axis, mean-std, mean+std, color='purple', alpha=0.2)
-        axes[i].set_ylabel(k)
-        axes[i].grid(True, alpha=0.3)
-        if i == 0: axes[i].set_title(f"{title_prefix} - {config.dataset_name}")
-            
-    axes[-1].set_xlabel("Epochs")
-    plt.tight_layout()
-    plt.savefig(os.path.join(config.figures_dir, filename))
-    print(f"  Saved plot to {filename}")
-
-
-def run_mtl_glue_analysis(config):
-    print("\n--- Starting MTL GLUE Metric Analysis ---")
-    mtl_dir = os.path.join(config.results_dir, "multitask")
-    
-    # 1. Setup
-    metric_names = [
-        'Capacity', 'Dimension', 'Radius', 
-        'Center Alignment', 'Axis Alignment', 'Center-Axis Alignment', 
-        'Approx Capacity'
-    ]
-    
-    # Constants
-    P = 2 
-    M = config.analysis_subsamples
-    N = config.hidden_dim
-    n_t = config.n_t
-    
-    # Initialize Solver
-    qp = OSQP(tol=1e-4)
-    vmapped_glue = jax.vmap(
-        partial(run_glue_solver, P=P, M=M, N=N, n_t=n_t, qp_solver=qp),
-        in_axes=(0, 0)
-    )
-    
-    # 2. Load Data
-    # Shape: (L, R, T, S, H)
-    reps_path = os.path.join(mtl_dir, "representations.npy")
-    # Shape: (R, T, S) -- Note: Transposed in train_multitask before saving
-    lbls_path = os.path.join(mtl_dir, "binary_labels.npy")
-    
-    if not os.path.exists(reps_path) or not os.path.exists(lbls_path):
-        print("Skipping MTL GLUE (Files not found)")
-        return
-
-    reps_data = np.load(reps_path)
-    lbls_data = np.load(lbls_path)
-    
-    L, R, T, S, H = reps_data.shape
-    
-    # Storage: results[task_name][metric] -> (Steps, Repeats)
-    full_results = {}
-    master_key = jax.random.PRNGKey(config.seed)
-
-    # 3. Iterate over Tasks and Time
-    for t_idx in range(T):
-        task_name = f"task_{t_idx:03d}"
-        print(f"Processing MTL GLUE for {task_name}...")
-        
-        full_results[task_name] = {m: [] for m in metric_names}
-        
-        # Labels for this task: (R, S)
-        current_eval_lbls = lbls_data[:, t_idx, :]
-        
-        for step in range(L):
-            # Reps: (R, S, H)
-            current_reps = reps_data[step, :, t_idx, :, :]
-            
-            # Format: (R, P, M, H)
-            formatted_data = _prep_glue_batch(current_reps, current_eval_lbls, P, M, H)
-            
-            # Keys
-            step_key = jax.random.fold_in(master_key, t_idx * 10000 + step)
-            batch_keys = jax.random.split(step_key, R)
-            
-            # Run Solver
-            metrics_tuple, _, _ = vmapped_glue(batch_keys, formatted_data)
-            
-            for i, name in enumerate(metric_names):
-                full_results[task_name][name].append(np.array(metrics_tuple[i]))
-
-        # Stack results: (Steps, Repeats)
-        for name in metric_names:
-            full_results[task_name][name] = np.stack(full_results[task_name][name])
-
-        # Plot specific task metrics
-        _plot_mtl_metrics(
-            full_results[task_name], 
-            config, 
-            f"MTL GLUE - {task_name}", 
-            f"mtl_glue_{task_name}.png"
-        )
-
-    # 4. Save
-    save_path = os.path.join(mtl_dir, "glue_metrics.pkl")
-    with open(save_path, 'wb') as f:
-        pickle.dump(full_results, f)
-    print(f"MTL GLUE metrics saved to {save_path}")
-
-
 def run_all_representation_analysis(experiment_path):
     """
-    Orchestrates the complete analysis suite for an experiment.
-    
+    Orchestrates the analysis suite for an experiment.
     1. Runs Plasticity Analysis (Drift, Rank, etc.)
     2. Runs GLUE Analysis (Manifold Geometry)
-    3. Runs Multi-Task Learning Analysis (Plasticity & GLUE on Joint Data)
-    4. Aggregates ALL raw metrics (preserving repeats) into 'all_metrics.pkl'
-    
-    Args:
-        config: The experiment configuration object.
-        experiment_path: Path to the specific experiment results directory.
+    3. Aggregates CL, Plasticity, and GLUE metrics.
     """
-    """
-    Orchestrates the complete analysis suite for an experiment.
-    Loads config from the experiment directory.
-    """
-    # --- 1. Load Configuration ---
     config_path = os.path.join(experiment_path, "config.pkl")
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Config file not found at {config_path}")
@@ -471,8 +252,6 @@ def run_all_representation_analysis(experiment_path):
     with open(config_path, 'rb') as f:
         config = pickle.load(f)
 
-    # Override config paths to point to the specific experiment folder
-    # (Crucial if folder was moved or renamed since training)
     config.results_dir = experiment_path
     config.reps_dir = experiment_path 
     config.figures_dir = os.path.join(experiment_path, "figures")
@@ -484,34 +263,15 @@ def run_all_representation_analysis(experiment_path):
     print(f"{'='*60}")
 
     # --- 1. Execute Individual Analysis Pipelines ---
-    
-    # A. Plasticity Metrics (CL)
-    # Generates: {experiment_path}/plastic_analysis_{dataset}.pkl
     try:
         run_plastic_analysis_pipeline(config)
     except Exception as e:
         print(f"Error in Plasticity Pipeline: {e}")
 
-    # B. GLUE Metrics (CL)
-    # Generates: {experiment_path}/glue_metrics.pkl
     try:
         run_glue_analysis_pipeline(config)
     except Exception as e:
         print(f"Error in GLUE Pipeline: {e}")
-
-    # C. Multi-Task Learning Analysis (Upper Bound)
-    # Generates: {experiment_path}/multitask/plasticity_metrics.pkl
-    # Generates: {experiment_path}/multitask/glue_metrics.pkl
-    if os.path.exists(os.path.join(config.results_dir, "multitask")):
-        try:
-            run_mtl_plasticity_analysis(config)
-            run_mtl_glue_analysis(config)
-            # Optional: Print summary to console
-            run_mtl_cl_metrics(config) 
-        except Exception as e:
-            print(f"Error in MTL Analysis: {e}")
-    else:
-        print("Skipping MTL Analysis (No 'multitask' directory found).")
 
     # --- 2. Aggregate All Metrics into Single Object ---
     print(f"\n{'='*60}")
@@ -521,71 +281,36 @@ def run_all_representation_analysis(experiment_path):
     all_metrics = {
         'cl': {},
         'plasticity': {},
-        'glue': {},
-        'mtl': {}
+        'glue': {}
     }
 
-    # --- A. Collect CL Metrics (Accuracy/Loss) ---
-    # Source: global_history.pkl
+    # A. Collect CL Metrics (Accuracy/Loss)
     hist_path = os.path.join(config.results_dir, "global_history.pkl")
     if os.path.exists(hist_path):
         with open(hist_path, 'rb') as f:
-            gh = pickle.load(f)
-            # gh['test_metrics'] -> {task_name: {'acc': (E, R), 'loss': (E, R)}}
-            all_metrics['cl'] = gh
+            all_metrics['cl'] = pickle.load(f)
             print(f"  [x] Loaded CL metrics (Global History)")
     else:
         print(f"  [ ] Missing global_history.pkl")
 
-    # --- B. Collect Plasticity Metrics ---
-    # Source: plastic_analysis_{dataset}.pkl
+    # B. Collect Plasticity Metrics
     plast_path = os.path.join(config.reps_dir, f"plastic_analysis_{config.dataset_name}.pkl")
     if os.path.exists(plast_path):
         with open(plast_path, 'rb') as f:
-            # Contains {'history': {metric: (Steps, Repeats)}, ...}
             data = pickle.load(f)
             all_metrics['plasticity'] = data.get('history', {})
             print(f"  [x] Loaded Plasticity metrics")
     else:
         print(f"  [ ] Missing plastic_analysis data")
 
-    # --- C. Collect GLUE Metrics ---
-    # Source: glue_metrics.pkl
+    # C. Collect GLUE Metrics
     glue_path = os.path.join(config.results_dir, "glue_metrics.pkl")
     if os.path.exists(glue_path):
         with open(glue_path, 'rb') as f:
-            # Contains {train_task: {eval_task: {metric: (Steps, Repeats)}}}
             all_metrics['glue'] = pickle.load(f)
             print(f"  [x] Loaded GLUE metrics")
     else:
         print(f"  [ ] Missing glue_metrics.pkl")
-
-    # --- D. Collect MTL Metrics ---
-    mtl_root = os.path.join(config.results_dir, "multitask")
-    if os.path.exists(mtl_root):
-        all_metrics['mtl'] = {'cl': {}, 'plasticity': {}, 'glue': {}}
-        
-        # MTL CL
-        mtl_cl_path = os.path.join(mtl_root, "metrics.pkl")
-        if os.path.exists(mtl_cl_path):
-            with open(mtl_cl_path, 'rb') as f:
-                all_metrics['mtl']['cl'] = pickle.load(f)
-        
-        # MTL Plasticity
-        mtl_plast_path = os.path.join(mtl_root, "plasticity_metrics.pkl")
-        if os.path.exists(mtl_plast_path):
-            with open(mtl_plast_path, 'rb') as f:
-                all_metrics['mtl']['plasticity'] = pickle.load(f)
-
-        # MTL GLUE
-        mtl_glue_path = os.path.join(mtl_root, "glue_metrics.pkl")
-        if os.path.exists(mtl_glue_path):
-            with open(mtl_glue_path, 'rb') as f:
-                all_metrics['mtl']['glue'] = pickle.load(f)
-        
-        print(f"  [x] Loaded MTL metrics (CL, Plasticity, GLUE)")
-    else:
-        print(f"  [ ] No MTL data found")
 
     # --- 3. Save Master Object ---
     save_path = os.path.join(config.results_dir, "all_metrics.pkl")
@@ -595,7 +320,6 @@ def run_all_representation_analysis(experiment_path):
     print(f"\nSUCCESS: All aggregated metrics saved to:\n  -> {save_path}")
 
 
-
 if __name__=='__main__':
-    experiment_path = "/home/users/MTrappett/manifold/binary_classification/results/mnist/RL/"
+    experiment_path = "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.01_lr2_0.01"
     run_all_representation_analysis(experiment_path)

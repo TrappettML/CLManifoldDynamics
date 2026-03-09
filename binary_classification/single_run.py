@@ -65,6 +65,21 @@ def main():
         help="Number of tasks for continual learning (up to 500 for ImageNet-1k)"
     )
 
+    # Add the learning rate arguments
+    parser.add_argument(
+        '--lr1',
+        type=float,
+        default=1e-2,
+        help="Learning rate for feature layers"
+    )
+    
+    parser.add_argument(
+        '--lr2',
+        type=float,
+        default=1e-4,
+        help="Learning rate for readout layer (classifier)"
+    )
+
     args = parser.parse_args()
 
     # --- 2. Load Config ---
@@ -74,7 +89,9 @@ def main():
         use_replay=args.use_replay,
         add_plasticity=args.add_plasticity,
         use_ul=args.use_ul,
-        num_tasks=args.num_tasks
+        num_tasks=args.num_tasks,
+        lr1=args.lr1,   # Pass lr1 here
+        lr2=args.lr2    # Pass lr2 here
     )
     
     print(f"\n{'='*60}")
