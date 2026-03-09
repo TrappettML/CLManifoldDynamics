@@ -18,6 +18,21 @@ from glue_module.glue_analysis import run_glue_solver
 import data_utils
 from plastic_analysis import _compute_weight_metrics_batch, _compute_rep_metrics_batch, run_plastic_analysis_pipeline
 
+# --- Helper to generate 2^n indices up to a limit ---
+def get_pow2_indices(limit):
+    indices = [0]
+    i = 1
+    while i < limit:
+        indices.append(i)
+        i *= 2
+    
+    # Optionally ensure the absolute last index is included
+    last_idx = limit - 1
+    if last_idx > 0 and (not indices or indices[-1] != last_idx):
+        indices.append(last_idx)
+        
+    return indices
+
 
 def _prep_glue_batch(reps_batch, labels_batch, P, M, H):
     """
@@ -78,6 +93,8 @@ def run_glue_analysis_pipeline(config):
         
         reps_path = os.path.join(task_dir, "representations.npy")
         lbls_path = os.path.join(task_dir, "binary_labels.npy")
+
+        
         
         if not os.path.exists(reps_path) or not os.path.exists(lbls_path):
             print(f"Skipping {train_task_name} (Files not found)")
@@ -88,63 +105,91 @@ def run_glue_analysis_pipeline(config):
         # Load Data
         reps_data = np.load(reps_path, allow_pickle=True) # (L, R, T_eval, S, H)
         lbls_data = np.load(lbls_path, allow_pickle=True) # (R, T_eval, S)
+
+        # 1. Extract the dictionary from the 0-d numpy object array
+        lbls_dict = lbls_data
+
+        # 2. Extract labels, squeeze the trailing dimension, and swap Samples/Repeats axes
+        formatted_lbls = []
+        for t_name in sorted(lbls_dict.keys()):
+            labels = lbls_dict[t_name][1]                # Shape: (400, 32, 1)
+            labels_reshaped = np.array(labels).squeeze(-1).T  # Shape: (32, 400)
+            formatted_lbls.append(labels_reshaped)
+
+        # 3. Stack tasks along axis 1 to get (Repeats, Tasks, Samples)
+        lbls_data = np.stack(formatted_lbls, axis=1)     # New Shape: (32, 20, 400)
         
         L, R_original, T_eval, S, H = reps_data.shape
         
-        # Determine strict device mapping for this batch
-        R = min(R_original, num_devices)
-        if R_original > num_devices:
-            print(f"  Truncating repeats from {R_original} -> {R} to match device count.")
+        # Determine device mapping and repeats per GPU
+        R_per_dev = R_original // num_devices
+        
+        if R_per_dev == 0:
+            # Fallback if fewer repeats than devices
+            R_per_dev = 1
+            num_active_devices = R_original
+            R_kept = R_original
+        else:
+            num_active_devices = num_devices
+            R_kept = R_per_dev * num_devices
+
+        if R_original > R_kept:
+            print(f"  Truncating repeats from {R_original} -> {R_kept} ({R_per_dev} per GPU) to evenly distribute.")
             
         # Select the exact devices we are mapping to
-        active_devices = all_devices[:R]
+        active_devices = all_devices[:num_active_devices]
         
-        # --- 1. JIT-Compiled Compute Step (Strict Multi-GPU) ---
-        # Initialize OSQP *inside* the mapped function so each GPU owns its solver
-        def compute_glue_single(key, data):
+        # --- 1. JIT-Compiled Compute Step (PMAP + VMAP) ---
+        def compute_glue_batch(keys, data):
             local_qp = OSQP(tol=1e-4)
-            return run_glue_solver(key, data, P=P, M=M, N=N, n_t=n_t, qp_solver=local_qp)
+            # vmap across the repeats assigned to this single device
+            def single_repeat(k, d):
+                return run_glue_solver(k, d, P=P, M=M, N=N, n_t=n_t, qp_solver=local_qp)
+            return jax.vmap(single_repeat)(keys, data)
             
         pmapped_glue_step = jax.pmap(
-            compute_glue_single,
+            compute_glue_batch,
             in_axes=(0, 0),
             devices=active_devices
         )
 
-        reps_data = reps_data[:, :R, ...]
-        lbls_data = lbls_data[:R, ...]
+        # Slice down to the evenly divisible amount
+        reps_data = reps_data[:, :R_kept, ...]
+        lbls_data = lbls_data[:R_kept, ...]
         
         full_results[train_task_name] = {}
 
-        for eval_task_idx in range(T_eval):
+        for eval_task_idx in get_pow2_indices(T_eval):
             eval_task_name = f"task_{eval_task_idx:03d}"
             full_results[train_task_name][eval_task_name] = {m: [] for m in metric_names}
             
             current_eval_lbls = lbls_data[:, eval_task_idx, :] # (R, S)
             
-            for step in tqdm(range(L), desc=f"  {eval_task_name}", leave=False):
-                current_reps = reps_data[step, :, eval_task_idx, :, :] # (R, S, H)
+            for step in tqdm(get_pow2_indices(L), desc=f"  {eval_task_name}", leave=False):
+                current_reps = reps_data[step, :, eval_task_idx, :, :] # (R_kept, S, H)
                 formatted_data = _prep_glue_batch(current_reps, current_eval_lbls, P, M, H) 
                 
                 step_key = jax.random.fold_in(master_key, train_task_idx * 10000 + step)
-                batch_keys = jax.random.split(step_key, R)
+                batch_keys = jax.random.split(step_key, R_kept)
+                
+                # --- Reshape for PMAP (num_active_devices, R_per_dev, ...) ---
+                sharded_keys = batch_keys.reshape((num_active_devices, R_per_dev) + batch_keys.shape[1:])
+                sharded_data = formatted_data.reshape(num_active_devices, R_per_dev, P, M, H)
                 
                 # --- PMAP execution strictly forced across active devices ---
-                metrics_tuple_pmap = pmapped_glue_step(batch_keys, formatted_data)
+                metrics_tuple_pmap = pmapped_glue_step(sharded_keys, sharded_data)
                 
-                # metrics_tuple_pmap is returned as a tuple of arrays. 
-                # Each array is shape (R, ...) 
                 for i, name in enumerate(metric_names):
-                    # Handle the unpack based on whether run_glue_solver returns just the metrics tuple 
-                    # or (metrics, state, extra). Assuming it returns a tuple of metrics.
-                    # Note: You might need metrics_tuple_pmap[0][i] if your previous code unpacked it as metrics_tuple_pmap, _, _
-                    # Adjust this index dynamically based on your glue_solver return shape.
                     if isinstance(metrics_tuple_pmap, tuple) and len(metrics_tuple_pmap) == 3:
-                        metric_val = metrics_tuple_pmap[0][i]
+                        metric_val = np.array(metrics_tuple_pmap[0][i])
                     else:
-                        metric_val = metrics_tuple_pmap[i]
+                        metric_val = np.array(metrics_tuple_pmap[i])
                         
-                    full_results[train_task_name][eval_task_name][name].append(np.array(metric_val))
+                    # Flatten the device and repeat dimensions back into (R_kept, ...)
+                    flat_shape = (R_kept,) + metric_val.shape[2:]
+                    metric_val = metric_val.reshape(flat_shape)
+                        
+                    full_results[train_task_name][eval_task_name][name].append(metric_val)
 
             # Stack lists into arrays -> (Steps, Repeats)
             for name in metric_names:
@@ -268,10 +313,11 @@ def run_all_representation_analysis(experiment_path):
     except Exception as e:
         print(f"Error in Plasticity Pipeline: {e}")
 
-    try:
-        run_glue_analysis_pipeline(config)
-    except Exception as e:
-        print(f"Error in GLUE Pipeline: {e}")
+    # try:
+    #     
+    # except Exception as e:
+    #     print(f"Error in GLUE Pipeline: {e}")
+    run_glue_analysis_pipeline(config)
 
     # --- 2. Aggregate All Metrics into Single Object ---
     print(f"\n{'='*60}")
