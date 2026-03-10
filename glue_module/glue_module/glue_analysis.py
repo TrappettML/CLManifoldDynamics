@@ -17,7 +17,10 @@ def run_glue_solver(key, data: jax.Array, P:int, M:int, N:int, n_t:int, qp_solve
     m_key, t_key, y_key = jax.random.split(key, 3)
     A = jnp.eye(N)
     H = jnp.zeros((P*M,1))
-    m_data = get_m_data(m_key, data, P, M, N)
+    m_data = data
+    assert m_data.shape[0] == P, "M_data wrong dim 0 size"
+    assert m_data.shape[1] == M, "M_data wrong dim 1 size"
+    assert m_data.shape[2] == N, "M_data wrong dim 2 size"
     all_ts = get_all_ts(t_key, N, n_t)
     all_ys = get_all_ys(y_key, P, n_t)
     P_indices = jnp.array(list(permutations(range(P), r=2)))
@@ -42,19 +45,19 @@ def run_glue_solver(key, data: jax.Array, P:int, M:int, N:int, n_t:int, qp_solve
     return glue_metrics, plotting_inputs, single_p_metrics
 
 
-def get_m_data(key, data: jax.Array, P: int, M, N) -> jax.Array:
-    """Sample from full data to get M data points
-    data shape: (P classes, num Points, N features)"""
-    m_keys = jax.random.split(key, P)
-    n_data_points = data.shape[1]
-    def sample_m(k):
-        return jax.random.choice(k, n_data_points, shape=(M,), replace=False)
-    m_data_axes = jax.vmap(sample_m)(m_keys)
-    m_data = jax.vmap(lambda d, indcs: d[indcs,:])(data, m_data_axes)
-    assert m_data.shape[0] == P, "M_data wrong dim 0 size"
-    assert m_data.shape[1] == M, "M_data wrong dim 1 size"
-    assert m_data.shape[2] == N, "M_data wrong dim 2 size"
-    return m_data
+# def get_m_data(key, data: jax.Array, P: int, M, N) -> jax.Array:
+#     """Sample from full data to get M data points
+#     data shape: (P classes, num Points, N features)"""
+#     m_keys = jax.random.split(key, P)
+#     n_data_points = data.shape[1]
+#     def sample_m(k):
+#         return jax.random.choice(k, n_data_points, shape=(M,), replace=False)
+#     m_data_axes = jax.vmap(sample_m)(m_keys)
+#     m_data = jax.vmap(lambda d, indcs: d[indcs,:])(data, m_data_axes)
+#     assert m_data.shape[0] == P, "M_data wrong dim 0 size"
+#     assert m_data.shape[1] == M, "M_data wrong dim 1 size"
+#     assert m_data.shape[2] == N, "M_data wrong dim 2 size"
+#     return m_data
 
 
 def get_all_ts(key, N: int, n_t: int):

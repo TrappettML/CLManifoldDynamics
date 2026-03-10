@@ -24,7 +24,7 @@ def get_pow2_indices(limit):
     i = 1
     while i < limit:
         indices.append(i)
-        i *= 2
+        i *= 3
     
     # Optionally ensure the absolute last index is included
     last_idx = limit - 1
@@ -34,35 +34,46 @@ def get_pow2_indices(limit):
     return indices
 
 
-def _prep_glue_batch(reps_batch, labels_batch, P, M, H):
+@jax.jit(static_argnames=('P', 'M'))
+def prep_glue_batch_jax(reps_batch, labels_batch, P, M):
     """
-    Python helper to organize raw mixed data into GLUE format.
-    Input:
-        reps_batch: (R, S, H) - Raw representations
-        labels_batch: (R, S)  - Binary labels (0 or 1)
-    Output:
-        formatted_data: (R, P, M, H) - Padded/Repeated to ensure M points per class
+    Pure JAX, fully vectorized version of _prep_glue_batch.
+    Executes entirely on the GPU without CPU control flow.
     """
-    R, S, _ = reps_batch.shape
-    formatted = np.zeros((R, P, M, H), dtype=np.float32)
+    R, S, H = reps_batch.shape
 
-    for r in range(R):
-        for p in range(P):
-            # Extract points for class p
-            idxs = np.where(labels_batch[r] == p)[0]
-            points = reps_batch[r, idxs, :]
+    def process_repeat(reps, labels):
+        def process_class(p):
+            # 1. Identify points belonging to class p
+            is_class = (labels == p) 
+            count = jnp.sum(is_class)
             
-            count = len(points)
-            if count == 0:
-                formatted[r, p, :, :] = np.random.randn(M, H) * 1e-4
-            elif count >= M:
-                formatted[r, p, :, :] = points[:M, :]
-            else:
-                repeats = (M // count) + 1
-                tiled = np.tile(points, (repeats, 1))
-                formatted[r, p, :, :] = tiled[:M, :]
-                
-    return formatted
+            # 2. Sort to push all valid class points to the front
+            # False (0) sorts before True (1). Reversing puts True at the front.
+            sorted_idxs = jnp.argsort(is_class)[::-1] 
+            
+            # 3. Handle Tiling dynamically (replaces np.tile and np.where)
+            # jnp.arange(M) % safe_count loops over valid indices exactly up to M
+            safe_count = jnp.maximum(count, 1)
+            tiled_idxs = sorted_idxs[jnp.arange(M) % safe_count]
+            
+            class_points = reps[tiled_idxs]
+            
+            # 4. Handle empty class case
+            # Using a tiny constant avoids needing to pass a PRNGKey just for noise
+            empty_fallback = jnp.ones((M, H)) * 1e-4 
+            
+            return jax.lax.select(
+                count == 0,
+                empty_fallback,
+                class_points
+            )
+            
+        # Vectorize across all P classes
+        return jax.vmap(process_class)(jnp.arange(P))
+
+    # Vectorize across all R repeats
+    return jax.vmap(process_repeat)(reps_batch, labels_batch)
 
 
 def run_glue_analysis_pipeline(config):
@@ -74,10 +85,10 @@ def run_glue_analysis_pipeline(config):
         'Approx Capacity'
     ]
     
-    P = 2 
+    P = 2 # always two with binary classification
     M = config.analysis_subsamples 
     N = config.hidden_dim
-    n_t = config.n_t
+    n_t = config.n_t//2 # decrease compute
     
     master_key = jax.random.PRNGKey(config.seed)
     all_devices = jax.devices()
@@ -159,44 +170,65 @@ def run_glue_analysis_pipeline(config):
         
         full_results[train_task_name] = {}
 
-        for eval_task_idx in [0,2,10]:
+        for eval_task_idx in [0, 2, 10]:
             eval_task_name = f"task_{eval_task_idx:03d}"
-            full_results[train_task_name][eval_task_name] = {m: [] for m in metric_names}
+            
+            # 1. Temporary storage for JAX device arrays
+            gpu_results = {m: [] for m in metric_names}
             
             current_eval_lbls = lbls_data[:, eval_task_idx, :] # (R, S)
             
-            for step in tqdm(get_pow2_indices(L), desc=f"  {eval_task_name}", leave=False):
+            for step in tqdm([0,2,5,L-1], desc=f"  {eval_task_name}", leave=False):
+            # for step in [0,2,5,L-1]:
                 current_reps = reps_data[step, :, eval_task_idx, :, :] # (R_kept, S, H)
-                formatted_data = _prep_glue_batch(current_reps, current_eval_lbls, P, M, H) 
+                formatted_data = prep_glue_batch_jax(current_reps, current_eval_lbls, P, M) 
                 
                 step_key = jax.random.fold_in(master_key, train_task_idx * 10000 + step)
                 batch_keys = jax.random.split(step_key, R_kept)
                 
-                # --- Reshape for PMAP (num_active_devices, R_per_dev, ...) ---
                 sharded_keys = batch_keys.reshape((num_active_devices, R_per_dev) + batch_keys.shape[1:])
                 sharded_data = formatted_data.reshape(num_active_devices, R_per_dev, P, M, H)
                 
-                # --- PMAP execution strictly forced across active devices ---
+                # --- Dispatch to GPU (Asynchronous) ---
                 metrics_tuple_pmap = pmapped_glue_step(sharded_keys, sharded_data)
                 
+                # 2. Extract ONLY the scalar metrics we want to keep
+                step_metrics_only = {}
                 for i, name in enumerate(metric_names):
                     if isinstance(metrics_tuple_pmap, tuple) and len(metrics_tuple_pmap) == 3:
-                        metric_val = np.array(metrics_tuple_pmap[0][i])
+                        metric_val = metrics_tuple_pmap[0][i]
                     else:
-                        metric_val = np.array(metrics_tuple_pmap[i])
-                        
-                    # Flatten the device and repeat dimensions back into (R_kept, ...)
-                    flat_shape = (R_kept,) + metric_val.shape[2:]
-                    metric_val = metric_val.reshape(flat_shape)
-                        
-                    full_results[train_task_name][eval_task_name][name].append(metric_val)
+                        metric_val = metrics_tuple_pmap[i]
+                    
+                    # Store the JAX device array pointer (DO NOT cast to numpy here)
+                    step_metrics_only[name] = metric_val
 
-            # Stack lists into arrays -> (Steps, Repeats)
+                # 3. Prevent OOM: Force evaluation of the tiny metrics, then delete the massive arrays
+                # jax.block_until_ready() forces the GPU to finish calculating this specific step.
+                # Because step_metrics_only uses negligible VRAM, blocking here is safe.
+                jax.tree_util.tree_map(lambda x: x.block_until_ready(), step_metrics_only)
+                
+                # Explicitly delete the full output tuple to free up plotting_inputs (Gs, anchor_points, etc.)
+                del metrics_tuple_pmap 
+                
+                # Append to our tracking lists
+                for name in metric_names:
+                    gpu_results[name].append(step_metrics_only[name])
+
+            # 4. End of Loop: Sync and transfer to CPU ONCE
+            full_results[train_task_name][eval_task_name] = {m: [] for m in metric_names}
+            
             for name in metric_names:
-                full_results[train_task_name][eval_task_name][name] = np.stack(
-                    full_results[train_task_name][eval_task_name][name], 
-                    axis=0
-                )
+                # Stack all steps along axis 0 (Still on GPU)
+                stacked_gpu_metric = jnp.stack(gpu_results[name], axis=0)
+                
+                # JAX -> NumPy transfer happens exactly ONE time per metric here
+                cpu_metric = jax.device_get(stacked_gpu_metric) 
+                
+                # Reshape to flatten device and repeat dimensions: (Steps, R_kept, ...)
+                flat_shape = (cpu_metric.shape[0], R_kept) + cpu_metric.shape[3:]
+                
+                full_results[train_task_name][eval_task_name][name] = cpu_metric.reshape(flat_shape)
 
     # --- 3. Save Results ---
     save_path = os.path.join(config.results_dir, "glue_metrics.pkl")
@@ -205,7 +237,7 @@ def run_glue_analysis_pipeline(config):
     print(f"GLUE metrics saved to {save_path}")
 
     # Plot
-    _plot_glue_results(full_results, metric_names, config)
+    # _plot_glue_results(full_results, metric_names, config)
 
 
 def _plot_glue_results(full_results, metric_names, config):
@@ -367,5 +399,5 @@ def run_all_representation_analysis(experiment_path):
 
 
 if __name__=='__main__':
-    experiment_path = "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.01_lr2_0.01"
+    experiment_path = "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.0001_lr2_0.01"
     run_all_representation_analysis(experiment_path)
