@@ -208,7 +208,7 @@ def main():
         task_dir = os.path.join(config.results_dir, task_name)
         os.makedirs(task_dir, exist_ok=True)
         
-        with open(os.path.join(task_dir, "binary_labels.npy"), 'wb') as f:
+        with open(os.path.join(task_dir, "binary_labels.pkl"), 'wb') as f:
             pickle.dump(test_data_dict, f)
 
         # Get Random Performance

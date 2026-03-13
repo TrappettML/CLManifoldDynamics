@@ -103,9 +103,7 @@ def run_glue_analysis_pipeline(config):
         task_dir = os.path.join(config.results_dir, train_task_name)
         
         reps_path = os.path.join(task_dir, "representations.npy")
-        lbls_path = os.path.join(task_dir, "binary_labels.npy")
-
-        
+        lbls_path = os.path.join(task_dir, "binary_labels.npy") # TODO: CHANGE TO PKL
         
         if not os.path.exists(reps_path) or not os.path.exists(lbls_path):
             print(f"Skipping {train_task_name} (Files not found)")

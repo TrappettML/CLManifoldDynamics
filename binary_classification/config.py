@@ -71,7 +71,7 @@ def get_config(algorithm,
     
     # Analysis Parameters
     config.analysis_subsamples = 200
-    config.n_t = 100
+    config.n_t = 50
     config.metric_type = 'acc'
     config.m_integrator = 'final'
 
