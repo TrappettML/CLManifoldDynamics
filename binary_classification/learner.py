@@ -296,8 +296,8 @@ class ContinualLearner:
         
         # Extract histories for saving
         weight_history = history_np['weights']  # (Outer, Repeats, Param_Dim)
-        rep_history = history_np['reps']  # (numTasks*nTestSamples, repeats, hiddenDim)
-
+        rep_history = history_np['reps']  # TODO: check this shape
+        set_trace()
         for h in self.hooks:
             h.on_task_end(task, self.state, metrics=None)
         

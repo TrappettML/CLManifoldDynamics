@@ -103,7 +103,7 @@ def run_glue_analysis_pipeline(config):
         task_dir = os.path.join(config.results_dir, train_task_name)
         
         reps_path = os.path.join(task_dir, "representations.npy")
-        lbls_path = os.path.join(task_dir, "binary_labels.npy") # TODO: CHANGE TO PKL
+        lbls_path = os.path.join(task_dir, "binary_labels.pkl") # TODO: CHANGE TO PKL
         
         if not os.path.exists(reps_path) or not os.path.exists(lbls_path):
             print(f"Skipping {train_task_name} (Files not found)")
@@ -113,10 +113,9 @@ def run_glue_analysis_pipeline(config):
         
         # Load Data
         reps_data = np.load(reps_path, allow_pickle=True) # (L, R, T_eval, S, H)
-        lbls_data = np.load(lbls_path, allow_pickle=True) # (R, T_eval, S)
-
-        # 1. Extract the dictionary from the 0-d numpy object array
-        lbls_dict = lbls_data
+        # lbls_data = np.load(lbls_path, allow_pickle=True) # (R, T_eval, S)
+        with open(lbls_path, 'rb') as f:
+            lbls_dict = pickle.load(f)
 
         # 2. Extract labels, squeeze the trailing dimension, and swap Samples/Repeats axes
         formatted_lbls = []
