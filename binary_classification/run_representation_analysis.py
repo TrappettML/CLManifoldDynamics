@@ -151,11 +151,13 @@ def run_glue_analysis_pipeline(config):
         
         # --- 1. JIT-Compiled Compute Step (PMAP + VMAP) ---
         def compute_glue_batch(keys, data):
-            local_qp = OSQP(tol=1e-4)
+            local_qp = OSQP(tol=1e-4, maxiter=1000)
             # vmap across the repeats assigned to this single device
             def single_repeat(k, d):
                 return run_glue_solver(k, d, P=P, M=M, N=N, n_t=n_t, qp_solver=local_qp)
-            return jax.vmap(single_repeat)(keys, data)
+            result = jax.vmap(single_repeat)(keys, data)
+            # jax.debug.print("Shape inside vmap: {shape}", shape=result[0][0].shape)
+            return result
             
         pmapped_glue_step = jax.pmap(
             compute_glue_batch,
@@ -190,14 +192,22 @@ def run_glue_analysis_pipeline(config):
                 
                 # --- Dispatch to GPU (Asynchronous) ---
                 metrics_tuple_pmap = pmapped_glue_step(sharded_keys, sharded_data)
-                
                 # 2. Extract ONLY the scalar metrics we want to keep
                 step_metrics_only = {}
                 for i, name in enumerate(metric_names):
                     if isinstance(metrics_tuple_pmap, tuple) and len(metrics_tuple_pmap) == 3:
+                        
+                        # Calculate both to compare
                         metric_val = metrics_tuple_pmap[0][i]
+                        
+                        # print(f"[DEBUG] If - Metric {i} ({name}):")
+                        # print(f"  -> Wrong slice [i] shape:      {metric_val.shape}") 
                     else:
-                        metric_val = metrics_tuple_pmap[i]
+                                                # Calculate both to compare
+                        metriv_val = metrics_tuple_pmap[i]
+                        
+                        # print(f"[DEBUG] Else - Metric {i} ({name}):")
+                        # print(f"  -> Wrong slice [i] shape:      {metriv_val.shape}") 
                     
                     # Store the JAX device array pointer (DO NOT cast to numpy here)
                     step_metrics_only[name] = metric_val

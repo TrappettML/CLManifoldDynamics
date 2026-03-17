@@ -30,9 +30,9 @@ def run_glue_solver(key, data: jax.Array, P:int, M:int, N:int, n_t:int, qp_solve
     ap_axes, t_1ks, axes_gram = get_aps_axis_var(anchor_points, centers, all_ts)
 
     # manifold geometries
-    capacity = (1/P * jnp.mean(jax.vmap(lambda s,t: (s@t.T).T @ jnp.linalg.pinv(s@s.T) @ (s@t.T), in_axes=(0,0))(anchor_points, all_ts)))**(-1)
-    dimension = (1/P * jnp.mean(jax.vmap(lambda t,g: t.T @ jnp.linalg.pinv(g) @ t, in_axes=(0,0))(t_1ks, axes_gram)))
-    indiv_dim = jnp.mean(jax.vmap(lambda t,g: t * (jnp.linalg.pinv(g)@t), in_axes=(0,0))(t_1ks, axes_gram), axis=0)
+    capacity = (1/P * jnp.mean(jax.vmap(lambda s,t: (s@t.T).T @ jnp.linalg.pinv(s@s.T, hermitian=True) @ (s@t.T), in_axes=(0,0))(anchor_points, all_ts)))**(-1)
+    dimension = (1/P * jnp.mean(jax.vmap(lambda t,g: t.T @ jnp.linalg.pinv(g, hermitian=True) @ t, in_axes=(0,0))(t_1ks, axes_gram)))
+    indiv_dim = jnp.mean(jax.vmap(lambda t,g: t * (jnp.linalg.pinv(g, hermitian=True)@t), in_axes=(0,0))(t_1ks, axes_gram), axis=0)
     radius = get_radius(t_1ks, axes_gram, center_gram)
     indiv_rad = get_indiv_radius(t_1ks, axes_gram, center_gram)
     center_align = get_center_alignment(centers, P, P_indices)
@@ -78,32 +78,32 @@ def get_all_ys(key, P:int, n_t: int):
 
 def get_radius(t_1ks, G_1ks, G_0):
     def rad_top(t,g_1):
-        return t.T @ jnp.linalg.pinv(g_1+G_0) @ t
+        return t.T @ jnp.linalg.pinv(g_1+G_0, hermitian=True) @ t
     def rad_bot(t,g_1):
-        return t.T @ jnp.linalg.pinv(g_1 + (g_1 @ jnp.linalg.pinv(G_0) @ g_1)) @ t
+        return t.T @ jnp.linalg.pinv(g_1 + (g_1 @ jnp.linalg.pinv(G_0, hermitian=True) @ g_1), hermitian=True) @ t
     # for neural data chou2025a
-    top_values = jax.vmap(rad_top)(t_1ks, G_1ks)
-    bot_values = jax.vmap(rad_bot)(t_1ks, G_1ks)
-    mean_top = jnp.mean(top_values)
-    mean_bot = jnp.mean(bot_values)
-    radius = jnp.sqrt(mean_top/mean_bot)
+    # top_values = jax.vmap(rad_top)(t_1ks, G_1ks)
+    # bot_values = jax.vmap(rad_bot)(t_1ks, G_1ks)
+    # mean_top = jnp.mean(top_values)
+    # mean_bot = jnp.mean(bot_values)
+    # radius = jnp.sqrt(mean_top/mean_bot)
     # for neural networks representations
-    # radius = jnp.sqrt(jnp.mean(jax.vmap(lambda t,g: rad_top(t,g)/rad_bot(t,g), in_axes=(0,0))(t_1ks, G_1ks)))
+    radius = jnp.sqrt(jnp.mean(jax.vmap(lambda t,g: rad_top(t,g)/rad_bot(t,g), in_axes=(0,0))(t_1ks, G_1ks)))
     return radius
 
 def get_indiv_radius(t_1ks, G_1ks, G_0):
     def rad_top(t,g_1):
-        return t.T * jnp.linalg.pinv(g_1+G_0) @ t
+        return t.T * jnp.linalg.pinv(g_1+G_0, hermitian=True) @ t
     def rad_bot(t,g_1):
-        return t.T * jnp.linalg.pinv(g_1 + (g_1 @ jnp.linalg.pinv(G_0) @ g_1)) @ t
+        return t.T * jnp.linalg.pinv(g_1 + (g_1 @ jnp.linalg.pinv(G_0, hermitian=True) @ g_1), hermitian=True) @ t
     # for neural data chou2025a
-    top_values = jax.vmap(rad_top)(t_1ks, G_1ks)
-    bot_values = jax.vmap(rad_bot)(t_1ks, G_1ks)
-    mean_top = jnp.mean(top_values, axis=0)
-    mean_bot = jnp.mean(bot_values, axis=0)
-    radius = jnp.sqrt(mean_top/mean_bot)
+    # top_values = jax.vmap(rad_top)(t_1ks, G_1ks)
+    # bot_values = jax.vmap(rad_bot)(t_1ks, G_1ks)
+    # mean_top = jnp.mean(top_values, axis=0)
+    # mean_bot = jnp.mean(bot_values, axis=0)
+    # radius = jnp.sqrt(mean_top/mean_bot)
     # for neural networks representations
-    # radius = jnp.sqrt(jnp.mean(jax.vmap(lambda t,g: rad_top(t,g)/rad_bot(t,g), in_axes=(0,0))(t_1ks, G_1ks)))
+    radius = jnp.sqrt(jnp.mean(jax.vmap(lambda t,g: rad_top(t,g)/rad_bot(t,g), in_axes=(0,0))(t_1ks, G_1ks)))
     return radius
 
 
@@ -163,7 +163,6 @@ def sample_anchor_points(m_data: jax.Array, all_t_ks: jax.Array, all_y_ks: jax.A
     assert all_anchor_points.shape[0] == n_t, "all aps not matching n_t, axis=0"
     assert all_anchor_points.shape[1] == P, "aps not matching P shape, axis=1"
     assert all_anchor_points.shape[2] == N, "aps not matching N shape, axis=2"
-
     return all_anchor_points, all_G, primals
 
 
