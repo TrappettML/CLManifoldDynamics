@@ -89,22 +89,61 @@ def run_glue_analysis_pipeline(config):
     M = config.analysis_subsamples 
     N = config.hidden_dim
     n_t = config.n_t #//2 # decrease compute
+
+    repeats = config.n_repeats
     
     master_key = jax.random.PRNGKey(config.seed)
     all_devices = jax.devices()
     num_devices = len(all_devices)
     print(f"Available JAX devices for PMAP: {num_devices}")
-
     full_results = {}
 
+    # --- Device Allocation Logic ---
+    # Determine device mapping and repeats per GPU before PMAP definition
+    R_per_dev = repeats // num_devices
+    
+    if R_per_dev == 0:
+        # Fallback if fewer repeats than devices
+        R_per_dev = 1
+        num_active_devices = repeats
+        R_kept = repeats
+    else:
+        num_active_devices = num_devices
+        R_kept = R_per_dev * num_devices
+
+    if repeats > R_kept:
+        print(f"Truncating configured repeats from {repeats} -> {R_kept} ({R_per_dev} per GPU) to evenly distribute.")
+        
+    # Select the exact devices we are mapping to
+    active_devices = all_devices[:num_active_devices]
+
+    # functions for pmap and vmap
+    qp_solver = OSQP(tol=1e-4, maxiter=1000)
+
+    # --- 1. JIT-Compiled Compute Step (PMAP + VMAP) ---
+    def compute_glue_batch(keys, data):
+        # vmap across the repeats assigned to this single device
+        def single_repeat(k, d):
+            glue_mets, _, _ = run_glue_solver(k, d, P=P, M=M, N=N, n_t=n_t, qp_solver=qp_solver)
+            return glue_mets
+            
+        result = jax.vmap(single_repeat)(keys, data)
+        return result
+        
+    pmapped_glue_step = jax.pmap(
+        compute_glue_batch,
+        in_axes=(0, 0),
+        devices=active_devices # Use the correctly calculated active_devices
+    )
+
     # --- 2. Process Training Tasks ---
-    for train_task_idx in [0,1]: # range(config.num_tasks): # look at just the first two tasks fully
+    for train_task_idx in [0, 1]: # range(config.num_tasks): # look at just the first two tasks fully
         train_task_name = f"task_{train_task_idx:03d}"
         task_dir = os.path.join(config.results_dir, train_task_name)
         
         reps_path = os.path.join(task_dir, "representations.npy")
         lbls_path = os.path.join(task_dir, "binary_labels.npy") # .npy for SL
-        # set_trace()
+        
         if not os.path.exists(reps_path) or not os.path.exists(lbls_path):
             print(f"Skipping {train_task_name} (Files not found)")
             continue
@@ -114,10 +153,8 @@ def run_glue_analysis_pipeline(config):
         # Load Data
         reps_data = np.load(reps_path, allow_pickle=True) # (L, R, T_eval, S, H)
         lbls_data = np.load(lbls_path, allow_pickle=True) # (R, T_eval, S)
-        # set_trace()
+        
         lbls_dict = lbls_data
-        # with open(lbls_path, 'rb') as f:
-        #     lbls_dict = pickle.load(f)
 
         # 2. Extract labels, squeeze the trailing dimension, and swap Samples/Repeats axes
         formatted_lbls = []
@@ -131,41 +168,11 @@ def run_glue_analysis_pipeline(config):
         
         L, R_original, T_eval, S, H = reps_data.shape
         
-        # Determine device mapping and repeats per GPU
-        R_per_dev = R_original // num_devices
-        
-        if R_per_dev == 0:
-            # Fallback if fewer repeats than devices
-            R_per_dev = 1
-            num_active_devices = R_original
-            R_kept = R_original
-        else:
-            num_active_devices = num_devices
-            R_kept = R_per_dev * num_devices
+        # Validation: check if the actual loaded repeats match the configuration
+        if R_original < R_kept:
+             raise ValueError(f"Loaded data only has {R_original} repeats, but pipeline configuration requires at least {R_kept}.")
 
-        if R_original > R_kept:
-            print(f"  Truncating repeats from {R_original} -> {R_kept} ({R_per_dev} per GPU) to evenly distribute.")
-            
-        # Select the exact devices we are mapping to
-        active_devices = all_devices[:num_active_devices]
-        
-        # --- 1. JIT-Compiled Compute Step (PMAP + VMAP) ---
-        def compute_glue_batch(keys, data):
-            local_qp = OSQP(tol=1e-4, maxiter=1000)
-            # vmap across the repeats assigned to this single device
-            def single_repeat(k, d):
-                return run_glue_solver(k, d, P=P, M=M, N=N, n_t=n_t, qp_solver=local_qp)
-            result = jax.vmap(single_repeat)(keys, data)
-            # jax.debug.print("Shape inside vmap: {shape}", shape=result[0][0].shape)
-            return result
-            
-        pmapped_glue_step = jax.pmap(
-            compute_glue_batch,
-            in_axes=(0, 0),
-            devices=active_devices
-        )
-
-        # Slice down to the evenly divisible amount
+        # Slice down to the evenly divisible amount determined outside the loop
         reps_data = reps_data[:, :R_kept, ...]
         lbls_data = lbls_data[:R_kept, ...]
         
@@ -204,7 +211,7 @@ def run_glue_analysis_pipeline(config):
                         # print(f"  -> Wrong slice [i] shape:      {metric_val.shape}") 
                     else:
                                                 # Calculate both to compare
-                        metriv_val = metrics_tuple_pmap[i]
+                        metric_val = metrics_tuple_pmap[i]
                         
                         # print(f"[DEBUG] Else - Metric {i} ({name}):")
                         # print(f"  -> Wrong slice [i] shape:      {metriv_val.shape}") 
