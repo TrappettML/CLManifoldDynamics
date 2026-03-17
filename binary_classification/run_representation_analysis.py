@@ -88,7 +88,7 @@ def run_glue_analysis_pipeline(config):
     P = 2 # always two with binary classification
     M = config.analysis_subsamples 
     N = config.hidden_dim
-    n_t = config.n_t//2 # decrease compute
+    n_t = config.n_t #//2 # decrease compute
     
     master_key = jax.random.PRNGKey(config.seed)
     all_devices = jax.devices()
@@ -98,13 +98,13 @@ def run_glue_analysis_pipeline(config):
     full_results = {}
 
     # --- 2. Process Training Tasks ---
-    for train_task_idx in range(config.num_tasks):
+    for train_task_idx in [0,1]: # range(config.num_tasks): # look at just the first two tasks fully
         train_task_name = f"task_{train_task_idx:03d}"
         task_dir = os.path.join(config.results_dir, train_task_name)
         
         reps_path = os.path.join(task_dir, "representations.npy")
-        lbls_path = os.path.join(task_dir, "binary_labels.pkl") # TODO: CHANGE TO PKL
-        
+        lbls_path = os.path.join(task_dir, "binary_labels.npy") # .npy for SL
+        # set_trace()
         if not os.path.exists(reps_path) or not os.path.exists(lbls_path):
             print(f"Skipping {train_task_name} (Files not found)")
             continue
@@ -113,9 +113,11 @@ def run_glue_analysis_pipeline(config):
         
         # Load Data
         reps_data = np.load(reps_path, allow_pickle=True) # (L, R, T_eval, S, H)
-        # lbls_data = np.load(lbls_path, allow_pickle=True) # (R, T_eval, S)
-        with open(lbls_path, 'rb') as f:
-            lbls_dict = pickle.load(f)
+        lbls_data = np.load(lbls_path, allow_pickle=True) # (R, T_eval, S)
+        # set_trace()
+        lbls_dict = lbls_data
+        # with open(lbls_path, 'rb') as f:
+        #     lbls_dict = pickle.load(f)
 
         # 2. Extract labels, squeeze the trailing dimension, and swap Samples/Repeats axes
         formatted_lbls = []
@@ -167,7 +169,7 @@ def run_glue_analysis_pipeline(config):
         
         full_results[train_task_name] = {}
 
-        for eval_task_idx in [0, 2, 10]:
+        for eval_task_idx in [0, 1]: # was [0,2,10]
             eval_task_name = f"task_{eval_task_idx:03d}"
             
             # 1. Temporary storage for JAX device arrays
@@ -175,7 +177,7 @@ def run_glue_analysis_pipeline(config):
             
             current_eval_lbls = lbls_data[:, eval_task_idx, :] # (R, S)
             
-            for step in tqdm([0,2,5,L-1], desc=f"  {eval_task_name}", leave=False):
+            for step in tqdm(range(L), desc=f"  {eval_task_name}", leave=False):
             # for step in [0,2,5,L-1]:
                 current_reps = reps_data[step, :, eval_task_idx, :, :] # (R_kept, S, H)
                 formatted_data = prep_glue_batch_jax(current_reps, current_eval_lbls, P, M) 
@@ -228,7 +230,7 @@ def run_glue_analysis_pipeline(config):
                 full_results[train_task_name][eval_task_name][name] = cpu_metric.reshape(flat_shape)
 
     # --- 3. Save Results ---
-    save_path = os.path.join(config.results_dir, "glue_metrics.pkl")
+    save_path = os.path.join(config.results_dir, "glue_metrics_2_tasks.pkl")
     with open(save_path, 'wb') as f:
         pickle.dump(full_results, f)
     print(f"GLUE metrics saved to {save_path}")
@@ -337,10 +339,10 @@ def run_all_representation_analysis(experiment_path):
     print(f"{'='*60}")
 
     # --- 1. Execute Individual Analysis Pipelines ---
-    try:
-        run_plastic_analysis_pipeline(config)
-    except Exception as e:
-        print(f"Error in Plasticity Pipeline: {e}")
+    # try:
+    #     run_plastic_analysis_pipeline(config)
+    # except Exception as e:
+    #     print(f"Error in Plasticity Pipeline: {e}")
 
     # try:
     #     
@@ -388,7 +390,7 @@ def run_all_representation_analysis(experiment_path):
         print(f"  [ ] Missing glue_metrics.pkl")
 
     # --- 3. Save Master Object ---
-    save_path = os.path.join(config.results_dir, "all_metrics.pkl")
+    save_path = os.path.join(config.results_dir, "all_metrics_2_tasks.pkl")
     with open(save_path, 'wb') as f:
         pickle.dump(all_metrics, f)
     
