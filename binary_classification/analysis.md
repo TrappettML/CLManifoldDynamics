@@ -112,7 +112,7 @@ $$
 Measures the learning quality of the current task relative to an independent "Expert" baseline ($E_i$).
 
 $$
-\text{FT}_{i} = \frac{E_{i} - R_{i,i}}{E_{i} + R_{i,i} + \epsilon}
+\text{FT}_{i} = \frac{R_{i,i} - E_{i}}{E_{i} + R_{i,i} + \epsilon}
 $$
 *(Note: $E_i$ must also be chance-corrected)*
 

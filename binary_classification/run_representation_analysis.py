@@ -415,5 +415,5 @@ def run_all_representation_analysis(experiment_path):
 
 
 if __name__=='__main__':
-    experiment_path = "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.0001_lr2_0.01"
+    experiment_path = "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.01_lr2_0.0001"
     run_all_representation_analysis(experiment_path)
