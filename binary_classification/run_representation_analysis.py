@@ -247,7 +247,7 @@ def run_glue_analysis_pipeline(config):
                 full_results[train_task_name][eval_task_name][name] = cpu_metric.reshape(flat_shape)
 
     # --- 3. Save Results ---
-    save_path = os.path.join(config.results_dir, "glue_metrics_2_tasks.pkl")
+    save_path = os.path.join(config.results_dir, "glue_metrics.pkl")
     with open(save_path, 'wb') as f:
         pickle.dump(full_results, f)
     print(f"GLUE metrics saved to {save_path}")
@@ -356,16 +356,16 @@ def run_all_representation_analysis(experiment_path):
     print(f"{'='*60}")
 
     # --- 1. Execute Individual Analysis Pipelines ---
-    # try:
-    #     run_plastic_analysis_pipeline(config)
-    # except Exception as e:
-    #     print(f"Error in Plasticity Pipeline: {e}")
+    try:
+        run_plastic_analysis_pipeline(config)
+    except Exception as e:
+        print(f"Error in Plasticity Pipeline: {e}")
 
     # try:
     #     
     # except Exception as e:
     #     print(f"Error in GLUE Pipeline: {e}")
-    run_glue_analysis_pipeline(config)
+    # run_glue_analysis_pipeline(config)
 
     # --- 2. Aggregate All Metrics into Single Object ---
     print(f"\n{'='*60}")
@@ -379,13 +379,13 @@ def run_all_representation_analysis(experiment_path):
     }
 
     # A. Collect CL Metrics (Accuracy/Loss)
-    hist_path = os.path.join(config.results_dir, "global_history.pkl")
-    if os.path.exists(hist_path):
-        with open(hist_path, 'rb') as f:
-            all_metrics['cl'] = pickle.load(f)
-            print(f"  [x] Loaded CL metrics (Global History)")
-    else:
-        print(f"  [ ] Missing global_history.pkl")
+    # hist_path = os.path.join(config.results_dir, "global_history.pkl")
+    # if os.path.exists(hist_path):
+    #     with open(hist_path, 'rb') as f:
+    #         all_metrics['cl'] = pickle.load(f)
+    #         print(f"  [x] Loaded CL metrics (Global History)")
+    # else:
+    #     print(f"  [ ] Missing global_history.pkl")
 
     # B. Collect Plasticity Metrics
     plast_path = os.path.join(config.reps_dir, f"plastic_analysis_{config.dataset_name}.pkl")
@@ -397,21 +397,21 @@ def run_all_representation_analysis(experiment_path):
     else:
         print(f"  [ ] Missing plastic_analysis data")
 
-    # C. Collect GLUE Metrics
-    glue_path = os.path.join(config.results_dir, "glue_metrics.pkl")
-    if os.path.exists(glue_path):
-        with open(glue_path, 'rb') as f:
-            all_metrics['glue'] = pickle.load(f)
-            print(f"  [x] Loaded GLUE metrics")
-    else:
-        print(f"  [ ] Missing glue_metrics.pkl")
+    # # C. Collect GLUE Metrics
+    # glue_path = os.path.join(config.results_dir, "glue_metrics.pkl")
+    # if os.path.exists(glue_path):
+    #     with open(glue_path, 'rb') as f:
+    #         all_metrics['glue'] = pickle.load(f)
+    #         print(f"  [x] Loaded GLUE metrics")
+    # else:
+    #     print(f"  [ ] Missing glue_metrics.pkl")
 
-    # --- 3. Save Master Object ---
-    save_path = os.path.join(config.results_dir, "all_metrics_2_tasks.pkl")
-    with open(save_path, 'wb') as f:
-        pickle.dump(all_metrics, f)
+    # # --- 3. Save Master Object ---
+    # save_path = os.path.join(config.results_dir, "all_metrics.pkl")
+    # with open(save_path, 'wb') as f:
+    #     pickle.dump(all_metrics, f)
     
-    print(f"\nSUCCESS: All aggregated metrics saved to:\n  -> {save_path}")
+    # print(f"\nSUCCESS: All aggregated metrics saved to:\n  -> {save_path}")
 
 
 if __name__=='__main__':

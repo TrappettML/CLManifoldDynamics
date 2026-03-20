@@ -1,4 +1,5 @@
 import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 import jax
@@ -7,6 +8,7 @@ from functools import partial
 import pickle
 import data_utils
 import config as config_module
+from ipdb import set_trace
 
 # --- JAX Optimized Metric Calculations ---
 # (Previous JIT functions _compute_rep_metrics_batch and _compute_weight_metrics_batch remain identical)
@@ -117,6 +119,7 @@ def run_plastic_analysis_pipeline(config):
             continue
             
         print(f"Processing {t_name}...")
+        # set_trace()
         
         # Load Data
         # reps: (L, R, T, S, H)
@@ -165,6 +168,11 @@ def run_plastic_analysis_pipeline(config):
         
         current_epoch_counter += epochs_in_task
         task_boundaries.append(current_epoch_counter)
+        del rep_data_np
+        del rep_res
+        del w_res
+        del w_data
+        del rep_data
 
     # 3. Convert to Arrays and Save Data
     for k in history:

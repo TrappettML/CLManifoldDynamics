@@ -1,10 +1,11 @@
 import os
+import re
 import pickle
-import argparse
 import math
 import warnings
 import numpy as np
 import matplotlib.pyplot as plt
+from ipdb import set_trace
 
 # --- Formatting Best Practices ---
 plt.rcParams.update({
@@ -20,29 +21,45 @@ plt.rcParams.update({
     'grid.linestyle': '--'
 })
 
-def load_algorithm_data(base_path):
+# Define the explicit paths you want to compare
+EXPERIMENT_PATHS = [
+    "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.01_lr2_0.01",
+    "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.0001_lr2_0.01",
+    "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.01_lr2_0.0001",
+    # "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.0001_lr2_0.0001"
+]
+
+OUTPUT_PATH = "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_slow_fast_comparison/"
+
+def extract_task_num(t_name):
+    """Helper to extract numbers for proper chronological sorting."""
+    nums = re.findall(r'\d+', t_name)
+    return int(nums[0]) if nums else 0
+
+def load_algorithm_data(experiment_paths):
     """
-    Scans the base directory for algorithm subfolders. 
+    Iterates through the provided list of experiment paths. 
     Strictly loads performance time-series data from global_history.pkl, 
-    and manifold/plasticity data from all_metrics.pkl.
+    manifold/plasticity data from all_metrics.pkl, and cl metrics from cl_metrics.pkl.
     """
     data_by_algo = {}
     config = None
     
-    for entry in os.listdir(base_path):
-        # Skip the output directory and hidden system files
-        if entry == "comparison_plots" or entry.startswith('.'):
+    for algo_dir in experiment_paths:
+        if not os.path.isdir(algo_dir):
+            print(f"Warning: Directory not found, skipping: {algo_dir}")
             continue
             
-        algo_dir = os.path.join(base_path, entry)
-        if not os.path.isdir(algo_dir):
-            continue
+        # Use the folder name as the algorithm label for plots
+        entry = os.path.basename(os.path.normpath(algo_dir))
             
         config_file = os.path.join(algo_dir, "config.pkl")
         gh_file = os.path.join(algo_dir, "global_history.pkl")
-        all_metrics_file = os.path.join(algo_dir, "all_metrics.pkl")
+        glue_metrics_file = os.path.join(algo_dir, "all_metrics.pkl")
+        plastic_metric_file = os.path.join(algo_dir, "plastic_analysis_imagenet_28_gray.pkl")
+        cl_metrics_file = os.path.join(algo_dir, "cl_metrics.pkl")
         
-        algo_data = {'performance': {}, 'plasticity': {}, 'glue': {}}
+        algo_data = {'performance': {}, 'plasticity': {}, 'glue': {}, 'cl_metrics': {}}
         loaded_any = False
 
         # Grab experiment configurations first so we have n_repeats for reshaping
@@ -56,19 +73,32 @@ def load_algorithm_data(base_path):
                 algo_data['performance'] = pickle.load(f)
             loaded_any = True
             
-        # 2. Load Plasticity and GLUE data strictly from all_metrics.pkl
-        if os.path.exists(all_metrics_file):
-            with open(all_metrics_file, 'rb') as f:
+        # 2. Load GLUE data strictly 
+        if os.path.exists(glue_metrics_file):
+            with open(glue_metrics_file, 'rb') as f:
                 master_data = pickle.load(f)
-                algo_data['plasticity'] = master_data.get('plasticity', {})
                 algo_data['glue'] = master_data.get('glue', {})
             loaded_any = True
+
+        # 3. Load Plasticity data strictly 
+        if os.path.exists(plastic_metric_file):
+            with open(plastic_metric_file, 'rb') as f:
+                master_data = pickle.load(f)
+                algo_data['plasticity'] = master_data.get('history', {})
+            loaded_any = True
+
+        # 4. Load CL metrics strictly
+        if os.path.exists(cl_metrics_file):
+            with open(cl_metrics_file, 'rb') as f:
+                algo_data['cl_metrics'] = pickle.load(f)
+            loaded_any = True
+            
 
         if loaded_any:
             data_by_algo[entry] = algo_data
             print(f"Loaded metric data for algorithm: {entry}")
         else:
-            print(f"Skipping {entry}: No metric files found. (Looked for global_history.pkl and all_metrics.pkl)")
+            print(f"Skipping {entry}: No metric files found. (Looked for global_history.pkl, all_metrics.pkl, and cl_metrics.pkl)")
             
     return data_by_algo, config
 
@@ -79,9 +109,8 @@ def extract_performance_data(data_by_algo, config):
     """
     acc_extracted = {}
     loss_extracted = {}
-    
-    # Fallback to 1 repeat if config is missing to prevent crashes
-    repeats = getattr(config, 'n_repeats', 1)
+
+    repeats = config.n_repeats
     
     for algo, data in data_by_algo.items():
         perf_data = data.get('performance', {})
@@ -175,11 +204,31 @@ def extract_glue_data(data_by_algo):
             
     return glue_extracted
 
+def extract_cl_metrics(data_by_algo):
+    """
+    Extracts raw Continual Learning arrays (e.g., 'transfer', 'remembering')
+    and explicitly ignores the pre-calculated 'stats' dictionary.
+    """
+    cl_extracted = {}
+    for algo, data in data_by_algo.items():
+        c_data = data.get('cl_metrics', {})
+        if not c_data:
+            continue
+            
+        # Filter out 'stats' and ensure we only keep numpy arrays
+        algo_metrics = {k: v for k, v in c_data.items() if k != 'stats' and isinstance(v, np.ndarray)}
+        
+        if algo_metrics:
+            cl_extracted[algo] = algo_metrics
+            
+    return cl_extracted
+
+
 def plot_performance_grid(acc_data, loss_data, save_path, config):
     """
     Plots Accuracy and Loss in the same figure.
-    Row 0: Accuracy across tasks
-    Row 1: Loss across tasks
+    Columns = Metrics (Col 0: Accuracy, Col 1: Loss)
+    Rows = Tasks (Sorted chronologically)
     """
     if not acc_data and not loss_data:
         print("No performance data available. Skipping plot.")
@@ -190,16 +239,18 @@ def plot_performance_grid(acc_data, loss_data, save_path, config):
     algorithms = sorted(list(acc_data.keys()))
     for algo in algorithms:
         tasks.update(acc_data[algo].keys())
-    tasks = sorted(list(tasks))
     
-    cols = len(tasks)
-    rows = 2
+    # Sort tasks numerically instead of alphabetically
+    tasks = sorted(list(tasks), key=extract_task_num)
     
-    if cols == 0:
+    rows = len(tasks)
+    cols = 2 # Accuracy and Loss
+    
+    if rows == 0:
         return
         
     fig_width = max(12, 6 * cols)
-    fig_height = max(8, 4 * rows)
+    fig_height = max(4, 3 * rows)
     fig, axes = plt.subplots(rows, cols, figsize=(fig_width, fig_height), squeeze=False)
     
     cmap = plt.get_cmap('tab10')
@@ -210,8 +261,8 @@ def plot_performance_grid(acc_data, loss_data, save_path, config):
         ('Loss', loss_data)
     ]
     
-    for r, (metric_name, data_dict) in enumerate(metrics_data):
-        for c, task in enumerate(tasks):
+    for r, task in enumerate(tasks):
+        for c, (metric_name, data_dict) in enumerate(metrics_data):
             ax = axes[r, c]
             max_x = 0
             has_data = False
@@ -234,7 +285,7 @@ def plot_performance_grid(acc_data, loss_data, save_path, config):
                     std = np.nanstd(data, axis=1)
                     
                 steps = len(mean)
-                total_epochs = getattr(config, 'epochs_per_task', 1000) * getattr(config, 'num_tasks', 2)
+                total_epochs = config.epochs_per_task * config.num_tasks
                 epochs = np.linspace(total_epochs / steps, total_epochs, steps)
                 
                 mask = ~np.isnan(mean)
@@ -251,9 +302,9 @@ def plot_performance_grid(acc_data, loss_data, save_path, config):
             if has_data:
                 # Setup Grid Titles and Labels
                 if r == 0: # Top row gets Col Titles
-                    ax.set_title(f"Task: {task}", fontweight='bold', pad=10)
+                    ax.set_title(f"{metric_name}", fontweight='bold', pad=10)
                 if c == 0: # Left Col gets Row Titles
-                    ax.set_ylabel(metric_name, fontweight='bold')
+                    ax.set_ylabel(f"{task}", fontweight='bold')
                 if r == rows - 1: # Bottom Row gets X Labels
                     ax.set_xlabel("Epochs")
                     
@@ -316,7 +367,8 @@ def plot_glue_timeseries_grid(data_dict, category_name, save_path, config):
             eval_tasks.update(data_dict[algo][metric].keys())
             
     metrics = sorted(list(metrics))
-    eval_tasks = sorted(list(eval_tasks))
+    # Sort tasks numerically here as well
+    eval_tasks = sorted(list(eval_tasks), key=extract_task_num)
     
     rows = len(metrics)
     cols = len(eval_tasks)
@@ -355,7 +407,7 @@ def plot_glue_timeseries_grid(data_dict, category_name, save_path, config):
                     std = np.nanstd(data, axis=1)
                     
                 steps = len(mean)
-                total_epochs = getattr(config, 'epochs_per_task', 1000) * getattr(config, 'num_tasks', 2)
+                total_epochs = config.epochs_per_task * config.num_tasks
                 epochs = np.linspace(total_epochs / steps, total_epochs, steps)
                 
                 mask = ~np.isnan(mean)
@@ -479,7 +531,7 @@ def plot_timeseries_grid(data_dict, category_name, save_path, config):
                 std = np.nanstd(data, axis=1)
 
             steps = len(mean)
-            total_epochs = getattr(config, 'epochs_per_task', 1000) * getattr(config, 'num_tasks', 2)
+            total_epochs = config.epochs_per_task * config.num_tasks
             epochs = np.linspace(total_epochs / steps, total_epochs, steps)
 
             mask = ~np.isnan(mean)
@@ -539,24 +591,128 @@ def plot_timeseries_grid(data_dict, category_name, save_path, config):
     plt.close()
     print(f"Saved {category_name} multi-plot to {save_path}")
 
+def plot_cl_metrics_bar(cl_data, save_path):
+    """
+    Plots a grouped bar chart for Continual Learning metrics (e.g. transfer, remembering).
+    Columns = 1, Rows = Number of metrics.
+    Handles both 2D (Tasks, Repeats) and 3D (Tasks, Tasks, Repeats) metric arrays.
+    """
+    if not cl_data:
+        print("No CL metrics available. Skipping plot.")
+        return
 
-def main():
-    parser = argparse.ArgumentParser(description="Generate algorithm comparison time-series subplots.")
-    parser.add_argument(
-        '--experiment_folder', 
-        type=str, 
-        required=True,
-        help="Path to the dataset experiment folder containing algorithm directories (e.g., /.../results/mnist/)"
-    )
-    args = parser.parse_args()
-    
-    base_path = args.experiment_folder
-    
-    if not os.path.exists(base_path):
-        raise FileNotFoundError(f"Experiment folder not found: {base_path}")
+    # Discover unique metrics
+    metrics = set()
+    algorithms = sorted(list(cl_data.keys()))
+    for algo in algorithms:
+        metrics.update(cl_data[algo].keys())
         
-    print(f"\nScanning for algorithms in: {base_path}")
-    data_by_algo, config = load_algorithm_data(base_path)
+    metrics = sorted(list(metrics))
+    if not metrics:
+        return
+
+    rows = len(metrics)
+    cols = 1
+    
+    fig_width = 14
+    fig_height = max(5, 4 * rows)
+    fig, axes = plt.subplots(rows, cols, figsize=(fig_width, fig_height), squeeze=False)
+    
+    cmap = plt.get_cmap('tab10')
+    colors = {algo: cmap(i % 10) for i, algo in enumerate(algorithms)}
+    
+    num_algos = len(algorithms)
+    bar_width = 0.8 / num_algos
+    
+    for r, metric in enumerate(metrics):
+        ax = axes[r, 0]
+        max_tasks = 0 
+        
+        for i, algo in enumerate(algorithms):
+            if metric not in cl_data[algo]: 
+                continue
+                
+            data = cl_data[algo][metric] 
+            
+            # Enforce at least 2D array
+            if data.ndim == 1:
+                data = data.reshape(-1, 1)
+                
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                
+                # Handle 3D arrays (e.g., remembering: 20x20x32)
+                # Average across the task-interaction dimension to get a per-task timeline
+                if data.ndim == 3:
+                    data = np.nanmean(data, axis=1)
+                
+                # Now data is guaranteed to be (Tasks, Repeats)
+                mean_vals = np.nanmean(data, axis=1)
+                
+                # Use actual valid non-NaN counts for SEM instead of raw shape
+                valid_counts = np.sum(~np.isnan(data), axis=1)
+                # Prevent division by zero where data was entirely NaNs
+                valid_counts = np.where(valid_counts == 0, 1, valid_counts) 
+                
+                std_error = np.nanstd(data, axis=1) / np.sqrt(valid_counts)
+            
+            num_tasks = len(mean_vals)
+            max_tasks = max(max_tasks, num_tasks)
+            indices = np.arange(num_tasks)
+            
+            # Calculate dynamic offsets to group the bars side-by-side
+            offset = (i - num_algos / 2 + 0.5) * bar_width
+            
+            # Filter out pure NaN bars so matplotlib doesn't complain
+            mask = ~np.isnan(mean_vals)
+            
+            ax.bar(
+                indices[mask] + offset, 
+                mean_vals[mask], 
+                width=bar_width, 
+                yerr=std_error[mask], 
+                label=algo if r == 0 else "", # Avoid legend duplication across subplots
+                color=colors[algo], 
+                capsize=3,
+                alpha=0.85
+            )
+            
+        # Format the subplot for this metric
+        ax.set_title(metric.replace('_', ' ').title(), fontweight='bold', pad=10)
+        ax.set_ylabel("Metric Value", fontweight='bold')
+        
+        if r == rows - 1:
+            ax.set_xlabel("Task Number", fontweight='bold')
+            
+        if max_tasks > 0:
+            ax.set_xticks(np.arange(max_tasks))
+            ax.set_xticklabels([str(t+1) for t in range(max_tasks)])
+        
+        # Turn off vertical grid lines for cleaner bar grouping
+        ax.grid(axis='x', visible=False) 
+        
+    # Standardized unified legend
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+
+    plt.suptitle("Continual Learning Metrics Per Task", fontsize=20, fontweight='bold')
+
+    if by_label:
+        fig.legend(
+            by_label.values(), by_label.keys(), 
+            # loc='upper center', bbox_to_anchor=(0.5, 0.98), 
+            # ncol=len(by_label), frameon=False
+        )
+        
+    # plt.tight_layout(rect=[0, 0, 1, 0.93])
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"Saved CL Metrics bar chart to {save_path}")
+
+
+def main(experiment_paths):
+    print(f"\nScanning the provided experiment paths...")
+    data_by_algo, config = load_algorithm_data(experiment_paths)
     
     if not data_by_algo:
         print("No valid metric data found. Exiting.")
@@ -569,8 +725,11 @@ def main():
             num_tasks = 2
         config = MockConfig()
     
-    # Setup Output Directory mapping where combined_box_plots writes
-    output_dir = os.path.join(base_path, "comparison_plots")
+
+    base_dir = OUTPUT_PATH
+    output_dir = os.path.join(base_dir, "comparison_plots")
+
+
     os.makedirs(output_dir, exist_ok=True)
     print(f"\nOutput directory ready: {output_dir}")
     
@@ -579,6 +738,7 @@ def main():
     acc_data, loss_data = extract_performance_data(data_by_algo, config)
     glue_data = extract_glue_data(data_by_algo)
     plasticity_data = extract_plasticity_data(data_by_algo)
+    cl_data = extract_cl_metrics(data_by_algo)
     
     # Plot Generation (Subplot panels)
     print("\nGenerating Time-Series Plots...")
@@ -607,7 +767,14 @@ def main():
         config=config
     )
     
+    # 4. Continual Learning Bar Charts
+    print("\nGenerating CL Metrics Bar Charts...")
+    plot_cl_metrics_bar(
+        cl_data, 
+        save_path=os.path.join(output_dir, "cl_metrics_comparison_bar.png")
+    )
+    
     print("\nAll comparison plots generated successfully!")
 
 if __name__ == "__main__":
-    main()
+    main(EXPERIMENT_PATHS)
