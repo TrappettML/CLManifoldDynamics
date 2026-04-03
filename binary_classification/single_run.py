@@ -80,6 +80,13 @@ def main():
         help="Learning rate for readout layer (classifier)"
     )
 
+    parser.add_argument(
+        '--num_epochs',
+        type=int,
+        default=1000,
+        help="Number of epochs to train per task"
+    )
+
     args = parser.parse_args()
 
     # --- 2. Load Config ---
@@ -90,8 +97,9 @@ def main():
         add_plasticity=args.add_plasticity,
         use_ul=args.use_ul,
         num_tasks=args.num_tasks,
-        lr1=args.lr1,   # Pass lr1 here
-        lr2=args.lr2    # Pass lr2 here
+        lr1=args.lr1,  
+        lr2=args.lr2,
+        num_epochs=args.num_epochs
     )
     
     print(f"\n{'='*60}")
@@ -279,6 +287,8 @@ def main():
         # 5. CLEANUP
         # ---------------------------------------------------------
         del train_X, train_Y, task, expert_task_wrapper
+
+        jax.clear_caches()
         
         total_epochs += config.epochs_per_task
         task_boundaries.append(total_epochs)

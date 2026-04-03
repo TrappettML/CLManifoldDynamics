@@ -26,7 +26,7 @@ EXPERIMENT_PATHS = [
     "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.01_lr2_0.01",
     "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.0001_lr2_0.01",
     "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.01_lr2_0.0001",
-    # "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.0001_lr2_0.0001"
+    "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.001_lr2_0.001"
 ]
 
 OUTPUT_PATH = "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_slow_fast_comparison/"
@@ -581,8 +581,6 @@ def plot_timeseries_grid(data_dict, category_name, save_path, config):
     if by_label:
         fig.legend(
             by_label.values(), by_label.keys(), 
-            loc='upper center', bbox_to_anchor=(0.5, 0.95), 
-            ncol=len(by_label), frameon=False
         )
         
     # Use tight_layout's rect parameter to reserve the top 8% of the figure 
@@ -593,9 +591,9 @@ def plot_timeseries_grid(data_dict, category_name, save_path, config):
 
 def plot_cl_metrics_bar(cl_data, save_path):
     """
-    Plots a grouped bar chart for Continual Learning metrics (e.g. transfer, remembering).
+    Plots a grouped bar chart for Continual Learning metrics (e.g. transfer, remembering, zero-shot).
     Columns = 1, Rows = Number of metrics.
-    Handles both 2D (Tasks, Repeats) and 3D (Tasks, Tasks, Repeats) metric arrays.
+    Handles both 2D (Tasks, Repeats) and 3D (Tasks, Tasks, Repeats) metric arrays natively.
     """
     if not cl_data:
         print("No CL metrics available. Skipping plot.")
@@ -615,7 +613,7 @@ def plot_cl_metrics_bar(cl_data, save_path):
     cols = 1
     
     fig_width = 14
-    fig_height = max(5, 4 * rows)
+    fig_height = max(5, 5 * rows)
     fig, axes = plt.subplots(rows, cols, figsize=(fig_width, fig_height), squeeze=False)
     
     cmap = plt.get_cmap('tab10')
@@ -641,7 +639,7 @@ def plot_cl_metrics_bar(cl_data, save_path):
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=RuntimeWarning)
                 
-                # Handle 3D arrays (e.g., remembering: 20x20x32)
+                # Handle 3D arrays (e.g., remembering: 20x20x32, zero_shot: 20x20x32)
                 # Average across the task-interaction dimension to get a per-task timeline
                 if data.ndim == 3:
                     data = np.nanmean(data, axis=1)
@@ -677,8 +675,12 @@ def plot_cl_metrics_bar(cl_data, save_path):
                 alpha=0.85
             )
             
-        # Format the subplot for this metric
-        ax.set_title(metric.replace('_', ' ').title(), fontweight='bold', pad=10)
+        # Format the subplot for this metric specifically
+        title_str = metric.replace('_', ' ').title()
+        if metric == 'zero_shot':
+            title_str = 'Zero-Shot Learning'
+            
+        ax.set_title(title_str, fontweight='bold', pad=10)
         ax.set_ylabel("Metric Value", fontweight='bold')
         
         if r == rows - 1:
@@ -708,6 +710,107 @@ def plot_cl_metrics_bar(cl_data, save_path):
     plt.savefig(save_path, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"Saved CL Metrics bar chart to {save_path}")
+
+def plot_cl_metrics_total_average_bar(cl_data, save_path):
+    """
+    Plots a bar chart for Continual Learning metrics averaged across all tasks.
+    Correctly propagates error by averaging tasks per repeat first, then calculating
+    the standard error of the mean (SEM) across independent repeats.
+    """
+    if not cl_data:
+        return
+
+    # Discover unique metrics
+    metrics = set()
+    algorithms = sorted(list(cl_data.keys()))
+    for algo in algorithms:
+        metrics.update(cl_data[algo].keys())
+        
+    metrics = sorted(list(metrics))
+    if not metrics:
+        return
+
+    rows = len(metrics)
+    fig_width = max(8, 2 * len(algorithms))
+    fig_height = max(5, 4 * rows)
+    fig, axes = plt.subplots(rows, 1, figsize=(fig_width, fig_height), squeeze=False)
+    
+    cmap = plt.get_cmap('tab10')
+    colors = {algo: cmap(i % 10) for i, algo in enumerate(algorithms)}
+    
+    for r, metric in enumerate(metrics):
+        ax = axes[r, 0]
+        
+        algo_means = []
+        algo_sems = []
+        valid_algos = []
+        algo_colors = []
+        
+        for algo in algorithms:
+            if metric not in cl_data[algo]: 
+                continue
+                
+            data = cl_data[algo][metric] 
+            
+            if data.ndim == 1:
+                data = data.reshape(-1, 1)
+                
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                
+                # Handle 3D arrays (e.g., remembering: 20x20x32)
+                if data.ndim == 3:
+                    data = np.nanmean(data, axis=1)
+                
+                # data is now (Tasks, Repeats). 
+                # Average over tasks first to preserve within-seed covariance.
+                repeat_means = np.nanmean(data, axis=0) 
+                
+                # Calculate final mean and SEM across the independent repeats
+                final_mean = np.nanmean(repeat_means)
+                valid_counts = np.sum(~np.isnan(repeat_means))
+                valid_counts = max(1, valid_counts) # Prevent division by zero
+                
+                final_sem = np.nanstd(repeat_means) / np.sqrt(valid_counts)
+            
+            valid_algos.append(algo)
+            algo_means.append(final_mean)
+            algo_sems.append(final_sem)
+            algo_colors.append(colors[algo])
+            
+        if not valid_algos:
+            continue
+            
+        x_pos = np.arange(len(valid_algos))
+        
+        ax.bar(
+            x_pos, 
+            algo_means, 
+            yerr=algo_sems, 
+            color=algo_colors, 
+            capsize=5,
+            alpha=0.85,
+            edgecolor='black',
+            linewidth=1.2
+        )
+        
+        ax.set_title(metric.replace('_', ' ').title(), fontweight='bold', pad=10)
+        ax.set_ylabel("Task-Averaged Value", fontweight='bold')
+        ax.set_xticks(x_pos)
+        
+        # Only add x-labels to the bottom plot to keep it clean
+        if r == rows - 1:
+            ax.set_xticklabels(valid_algos, rotation=15, ha="right", fontweight='bold')
+        else:
+            ax.set_xticklabels([])
+            
+        ax.grid(axis='x', visible=False) 
+        
+    plt.suptitle("Total Average CL Metrics Across All Tasks", fontsize=20, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"Saved Total Average CL Metrics bar chart to {save_path}")
 
 
 def main(experiment_paths):
@@ -773,6 +876,14 @@ def main(experiment_paths):
         cl_data, 
         save_path=os.path.join(output_dir, "cl_metrics_comparison_bar.png")
     )
+
+    # 5. Total Average Continual Learning Bar Charts
+    plot_cl_metrics_total_average_bar(
+        cl_data,
+        save_path=os.path.join(output_dir, "cl_metrics_total_average_bar.png")
+    )
+
+
     
     print("\nAll comparison plots generated successfully!")
 

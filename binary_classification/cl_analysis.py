@@ -1,6 +1,12 @@
+import os
+import pickle
+import argparse
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+
+EXPERIMENT_PATH = "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/SL_20_tasks_lr1_0.0001_lr2_0.01"
 
 def get_metric_integrator(metric_name: str):
     """
@@ -84,10 +90,9 @@ def calculate_expert_vector(expert_histories_dict, task_names, metric_type, log_
         E_list.append(val)
         
     return jnp.stack(E_list, axis=0) # (N_Tasks, N_Repeats)
-
 def compute_and_log_cl_metrics(global_history, expert_histories, config):
     """
-    Computes Remembering and Transfer. 
+    Computes Remembering, Transfer, and Zero-Shot Learning. 
     Accepts 'm_integrator' to switch between 'auc' (Anytime) and 'final' (End-of-Task).
     """
     print(f"\n--- Computing CL Metrics ({config.metric_type.upper()} | Integrator: {config.m_integrator}) ---")
@@ -124,28 +129,53 @@ def compute_and_log_cl_metrics(global_history, expert_histories, config):
     rem_matrix_full = (m_diag_expanded - M) / (m_diag_expanded + M + eps)
     
     # Extract Upper Triangle (j > i) for valid Remembering scores
-    mask = jnp.triu(jnp.ones((n_tasks, n_tasks)), k=1)
-    mask = jnp.expand_dims(mask, -1) # Broadcast to repeats
+    mask_rem = jnp.triu(jnp.ones((n_tasks, n_tasks)), k=1)
+    mask_rem = jnp.expand_dims(mask_rem, -1) # Broadcast to repeats
     
     # Apply mask
-    rem_values = jnp.where(mask, rem_matrix_full, jnp.nan)
+    rem_values = jnp.where(mask_rem, rem_matrix_full, jnp.nan)
+
+    # --- Zero-Shot Learning (ZSL) ---
+    # Extract Lower Triangle (i > j) representing performance on task i before training on it
+    mask_zsl = jnp.tril(jnp.ones((n_tasks, n_tasks)), k=-1)
+    mask_zsl = jnp.expand_dims(mask_zsl, -1)
+    
+    # Extract absolute performance on unseen tasks
+    zsl_values = jnp.where(mask_zsl, M, jnp.nan)
 
     # 5. Sign Correction (Metric Agnostic)
     if config.metric_type == 'acc':
-        # Invert signs so that Positive always means "Good"
+        # Invert signs so that Positive always means "Good" for relative metrics
         ft_final = -ft_per_task
         rem_final = -rem_values
     else:
         ft_final = ft_per_task
         rem_final = rem_values
 
+    # Note: ZSL is an absolute performance metric (unlike the relative Rem/FT formulas), 
+    # so we do not apply sign correction to it. It remains the raw accuracy or loss.
+
     # 6. Aggregation
-    avg_ft = jnp.nanmean(ft_final)
-    std_ft = jnp.std(jnp.nanmean(ft_final, axis=1))
+    # --- Transfer ---
+    # 1. Get the mean Transfer score for each repeat independently
+    ft_per_repeat = jnp.nanmean(ft_final, axis=0) # Shape: (N_Repeats,)
     
-    avg_rem = jnp.nanmean(rem_final)
-    rem_per_repeat = jnp.nanmean(rem_final, axis=(0, 1))
+    # 2. Calculate global mean and the std deviation across the repeats
+    avg_ft = jnp.nanmean(ft_per_repeat) 
+    std_ft = jnp.std(ft_per_repeat)
+    
+    # --- Remembering ---
+    # 1. Get the mean Remembering score for each repeat (averaging over both task axes)
+    rem_per_repeat = jnp.nanmean(rem_final, axis=(0, 1)) # Shape: (N_Repeats,)
+    
+    # 2. Calculate global mean and the std deviation across the repeats
+    avg_rem = jnp.nanmean(rem_per_repeat)
     std_rem = jnp.std(rem_per_repeat)
+
+    
+    zsl_per_repeat = jnp.nanmean(zsl_values, axis=(0, 1))
+    avg_zsl = jnp.nanmean(zsl_per_repeat)
+    std_zsl = jnp.std(zsl_per_repeat)
 
     # 7. Reporting
     print("-" * 65)
@@ -154,13 +184,70 @@ def compute_and_log_cl_metrics(global_history, expert_histories, config):
     
     print(f"{'Remembering (Stability)':<25} | {float(avg_rem):<12.4f} | {float(std_rem):<12.4f}")
     print(f"{'Transfer (vs Expert)':<25} | {float(avg_ft):<12.4f} | {float(std_ft):<12.4f}")
+    print(f"{'Zero-Shot Learning':<25} | {float(avg_zsl):<12.4f} | {float(std_zsl):<12.4f}")
     print("-" * 65)
 
     return {
         'transfer': np.array(ft_final),
         'remembering': np.array(rem_final),
+        'zero_shot': np.array(zsl_values),
         'stats': {
             'rem_mean': float(avg_rem), 
-            'trans_mean': float(avg_ft)
+            'rem_std': np.array(std_rem),
+            'trans_mean': float(avg_ft),
+            'trans_std': np.array(std_ft),
+            'zsl_mean': float(avg_zsl),
+            'zsl_std': np.array(std_zsl)
         }
     }
+
+
+def run_cl_analysis(experiment_path):
+    """
+    Standalone execution: Loads necessary files from an experiment directory,
+    reconstructs expert histories, computes CL metrics, and saves the results.
+    """
+    config_path = os.path.join(experiment_path, "config.pkl")
+    history_path = os.path.join(experiment_path, "global_history.pkl")
+    
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found at {config_path}")
+    if not os.path.exists(history_path):
+        raise FileNotFoundError(f"Global history file not found at {history_path}")
+        
+    with open(config_path, 'rb') as f:
+        config = pickle.load(f)
+        
+    with open(history_path, 'rb') as f:
+        global_history = pickle.load(f)
+        
+    # Reconstruct expert_histories from individual task directories
+    expert_histories = {}
+    for task_idx in range(config.num_tasks):
+        task_name = f"task_{task_idx:03d}"
+        expert_path = os.path.join(experiment_path, task_name, "expert_metrics.pkl")
+        
+        if os.path.exists(expert_path):
+            with open(expert_path, 'rb') as f:
+                exp_data = pickle.load(f)
+                expert_histories[task_name] = {
+                    'loss': exp_data['test_loss'], 
+                    'acc': exp_data['test_acc']
+                }
+        else:
+            print(f"Warning: Missing expert_metrics.pkl for {task_name} at {expert_path}")
+            
+    # Compute metrics
+    cl_results = compute_and_log_cl_metrics(global_history, expert_histories, config)
+    
+    # Save results
+    save_path = os.path.join(experiment_path, "cl_metrics.pkl")
+    with open(save_path, 'wb') as f:
+        pickle.dump(cl_results, f)
+        
+    print(f"\nStandalone CL metrics successfully saved to:\n  -> {save_path}")
+    return cl_results
+
+
+if __name__ == "__main__":
+    run_cl_analysis(EXPERIMENT_PATH)

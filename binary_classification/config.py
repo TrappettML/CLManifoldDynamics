@@ -8,7 +8,8 @@ def get_config(algorithm,
                 num_tasks=2, 
                 dataset_name="imagenet_28_gray", 
                 lr1=1e-2, 
-                lr2=1e-4
+                lr2=1e-4,
+                num_epochs=1000,
                 ) -> ml_collections.ConfigDict:
     config = ml_collections.ConfigDict()
 
@@ -26,7 +27,7 @@ def get_config(algorithm,
     if config.use_ul:
         algo_name += "_ul"
 
-    algo_name += f"_lr1_{lr1}_lr2_{lr2}"
+    algo_name += f"_epochs_{num_epochs}_lr1_{lr1}_lr2_{lr2}"
 
     # Algorithm & Dataset
     config.algorithm = algo_name
@@ -57,7 +58,7 @@ def get_config(algorithm,
     config.weight_decay = 0.0
     
     # Training Schedule
-    config.epochs_per_task = 1000
+    config.epochs_per_task = num_epochs
     config.log_frequency = 10
     config.n_repeats = 32
     

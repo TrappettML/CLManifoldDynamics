@@ -11,7 +11,6 @@ import config as config_module
 from ipdb import set_trace
 
 # --- JAX Optimized Metric Calculations ---
-# (Previous JIT functions _compute_rep_metrics_batch and _compute_weight_metrics_batch remain identical)
 
 @partial(jax.jit, static_argnames=('hidden_dim', 'tau'))
 def _compute_rep_metrics_batch(representations, hidden_dim, tau=0.1):
