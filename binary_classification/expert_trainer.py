@@ -107,6 +107,8 @@ def train_single_expert(config, train_task, test_data):
     sharded_final, (s_tr_l, s_tr_a, s_te_l, s_te_a) = pmap_loop(
         sharded_state, sharded_t_imgs, sharded_t_lbls, sharded_test_i, sharded_test_l
     )
+
+    del sharded_state, sharded_t_imgs, sharded_t_lbls, sharded_test_i, sharded_test_l
     
     # Unshard outputs back to numpy formats
     tr_l = np.array(unshard_data(s_tr_l, 1))

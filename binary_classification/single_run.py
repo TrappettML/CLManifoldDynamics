@@ -152,6 +152,8 @@ def main():
     test_data_dict = data_utils.preload_all_test_data(
         task_class_pairs, X_test_global, Y_test_global, config
     )
+
+    del X_test_global, Y_test_global
     
     # --- 6. Visualize Tasks ---
     data_utils.save_task_samples_grid(
@@ -165,6 +167,8 @@ def main():
     init_weights = learner.get_flat_params(learner.state)
     init_save_path = os.path.join(config.results_dir, "init_weights.npy")
     np.save(init_save_path, np.array(init_weights))
+
+    del init_weights
 
     # Initialize RNG for subsampling
     rng = np.random.default_rng(config.seed)
@@ -243,6 +247,8 @@ def main():
         if weight_history is not None:
             np.save(os.path.join(task_dir, "weights.npy"), weight_history)
         
+        del rep_history, weight_history
+
         # Save Learner Metrics
         learner_metrics = {
             'train_acc': global_history['train_acc'][-config.epochs_per_task:],

@@ -272,6 +272,9 @@ class ContinualLearner:
 
         self.state = jax.tree_util.tree_map(lambda x: unshard_data(x, 0), curr_state)
 
+        del sharded_imgs, sharded_lbls, sharded_test, curr_state
+        del epoch_data_imgs, epoch_data_lbls
+
         # Re-assemble CPU history trees across chunks
         history_np = {
             'tr_loss': np.concatenate([c['tr_loss'] for c in cpu_history_trees], axis=0),
@@ -285,6 +288,8 @@ class ContinualLearner:
                 np.concatenate([c['test'][t_name][0] for c in cpu_history_trees], axis=0),
                 np.concatenate([c['test'][t_name][1] for c in cpu_history_trees], axis=0)
             )
+
+        del cpu_history_trees
 
         # --- Post-processing logic remains exactly the same ---
         tr_loss_dense = history_np['tr_loss'].reshape(-1, self.config.n_repeats)
