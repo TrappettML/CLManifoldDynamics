@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #SBATCH --job-name=SL_test
-#SBATCH --output=%x-%A-%a.out
-#SBATCH --error=%x-%A-%a.err
+#SBATCH --output=./logs/%x-%A-%a.out
+#SBATCH --error=./logs/%x-%A-%a.err
 
 #SBATCH --partition=gpu           
 #SBATCH --time=1-00:00:00     ### Wall clock time limit in Days-HH:MM:SS
