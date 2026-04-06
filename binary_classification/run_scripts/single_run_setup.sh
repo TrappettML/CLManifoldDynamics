@@ -67,18 +67,10 @@ echo "Num Tasks:   $TASKS"
 echo "Num Epochs:  $EPOCHS"
 echo "=========================================================="
 
-# Create logs directory if it doesn't exist
-mkdir -p ./logs
-
-# Define a descriptive log file name
-LOG_FILE="./logs/run_${ALG}_lr1-${LR1}_lr2-${LR2}_ep-${EPOCHS}.log"
-
-echo "Logging output to: $LOG_FILE"
-
 # Execute the Python script and redirect output
 python single_run.py \
     --algorithm "$ALG" \
     --lr1 "$LR1" \
     --lr2 "$LR2" \
     --num_tasks "$TASKS" \
-    --num_epochs "$EPOCHS" > "$LOG_FILE" 2>&1
+    --num_epochs "$EPOCHS" 
