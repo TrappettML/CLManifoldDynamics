@@ -15,6 +15,7 @@
 #SBATCH --array=0-4           ### Array index
 
 module load cuda/13.0
+module load miniconda3/20240410
 
 conda activate talapas_mandi_env
 
