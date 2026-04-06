@@ -14,22 +14,27 @@ ALGORITHMS=("SL")
 LR1_VALS=("1e-2" "1e-3" "1e-4")
 LR2_VALS=("1e-4" "1e-5")
 NUM_TASKS=("5") # Constant for this particular sweep
+NUM_EPOCHS=("50")
 
 # 2. Initialize empty arrays to hold the exact combinations
 COMBINED_ALG=()
 COMBINED_LR1=()
 COMBINED_LR2=()
 COMBINED_TASKS=()
+COMBINED_EPOCHS=()
 
 # 3. Generate all combinations (Cartesian Product)
 for alg in "${ALGORITHMS[@]}"; do
     for lr1 in "${LR1_VALS[@]}"; do
         for lr2 in "${LR2_VALS[@]}"; do
             for task in "${NUM_TASKS[@]}"; do
+                for epoch in "${NUM_EPOCHS[@]}" do
                 COMBINED_ALG+=("$alg")
                 COMBINED_LR1+=("$lr1")
                 COMBINED_LR2+=("$lr2")
                 COMBINED_TASKS+=("$task")
+                COMBINED_TASKS+=("$epoch")
+                done
             done
         done
     done
@@ -50,6 +55,7 @@ ALG=${COMBINED_ALG[$ARRAY_INDEX]}
 LR1=${COMBINED_LR1[$ARRAY_INDEX]}
 LR2=${COMBINED_LR2[$ARRAY_INDEX]}
 TASKS=${COMBINED_TASKS[$ARRAY_INDEX]}
+EPOCHS=${COMBINED_EPOCHS[$ARRAY_INDEX]}
 
 echo "=========================================================="
 echo "Grid Search Configuration"
@@ -58,6 +64,7 @@ echo "Algorithm:   $ALG"
 echo "LR1:         $LR1"
 echo "LR2:         $LR2"
 echo "Num Tasks:   $TASKS"
+echo "Num Epochs:  $EPOCHS"
 echo "=========================================================="
 
 # 6. Execute the Python script
@@ -66,4 +73,4 @@ python single_run.py \
     --lr1 "$LR1" \
     --lr2 "$LR2" \
     --num_tasks "$TASKS" \
-    --num_epochs 100
+    --num_epochs "$EPOCHS"

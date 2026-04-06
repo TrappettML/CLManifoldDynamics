@@ -30,4 +30,4 @@ nvidia-smi --query-gpu=gpu_name,memory.total --format=csv
 echo "=========================================================="
 
 # run the python script
-./single_run_setup.sh $SLURM_ARRAY_TASK_ID
+./run_scripts/single_run_setup.sh $SLURM_ARRAY_TASK_ID
