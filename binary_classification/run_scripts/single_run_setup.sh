@@ -28,7 +28,7 @@ for alg in "${ALGORITHMS[@]}"; do
     for lr1 in "${LR1_VALS[@]}"; do
         for lr2 in "${LR2_VALS[@]}"; do
             for task in "${NUM_TASKS[@]}"; do
-                for epoch in "${NUM_EPOCHS[@]}" do
+                for epoch in "${NUM_EPOCHS[@]}"; do
                 COMBINED_ALG+=("$alg")
                 COMBINED_LR1+=("$lr1")
                 COMBINED_LR2+=("$lr2")
