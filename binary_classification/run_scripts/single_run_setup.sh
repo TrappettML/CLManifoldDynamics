@@ -33,7 +33,7 @@ for alg in "${ALGORITHMS[@]}"; do
                 COMBINED_LR1+=("$lr1")
                 COMBINED_LR2+=("$lr2")
                 COMBINED_TASKS+=("$task")
-                COMBINED_TASKS+=("$epoch")
+                COMBINED_EPOCHS+=("$epoch")
                 done
             done
         done
