@@ -163,7 +163,7 @@ def main():
     # --- 7. Setup Learner ---
     learner = ContinualLearner(config, hooks=[LoggerHook()])
     
-    print("\nSaving random initialization weights...")
+    print("\nSaving random initialization weights...", flush=True)
     init_weights = learner.get_flat_params(learner.state)
     init_save_path = os.path.join(config.results_dir, "init_weights.npy")
     np.save(init_save_path, np.array(init_weights))
@@ -198,7 +198,7 @@ def main():
     for task_idx in range(config.num_tasks):
         task_name = f"task_{task_idx:03d}"
         
-        print(f"\n>>> TASK {task_idx + 1}/{config.num_tasks}: {task_name} <<<")
+        print(f"\n>>> TASK {task_idx + 1}/{config.num_tasks}: {task_name} <<<", flush=True)
         
         # ---------------------------------------------------------
         # 1. LAZY LOAD: Generate training data for this task
@@ -299,7 +299,7 @@ def main():
         total_epochs += config.epochs_per_task
         task_boundaries.append(total_epochs)
         
-        print(f"  [Memory] Training data for {task_name} cleared")
+        print(f"  [Memory] Training data for {task_name} cleared", flush=True)
 
     learner.clear_test_cache()
     

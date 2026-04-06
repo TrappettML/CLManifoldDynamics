@@ -126,7 +126,7 @@ class ContinualLearner:
 
     def train_task(self, task, test_data_dict, global_history):
         task_name = task['name']
-        print(f"\n=== Training on {task_name} ===")
+        print(f"\n=== Training on {task_name} ===", flush=True)
         
         for h in self.hooks:
             h.on_task_start(task, self.state)
@@ -190,7 +190,7 @@ class ContinualLearner:
         )
     
         num_chunks = math.ceil(total_outer_steps / chunk_size_steps)
-        print(f"  [Memory Manager] Executing {total_outer_steps} total logs across {num_chunks} chunk(s).")
+        print(f"  [Memory Manager] Executing {total_outer_steps} total logs across {num_chunks} chunk(s).", flush=True)
 
         cpu_history_trees = []
         curr_state = sharded_state
@@ -322,7 +322,7 @@ class ContinualLearner:
         for h in self.hooks:
             h.on_task_end(task, self.state, metrics=None)
         
-        print(f"  Training complete for {task_name}")
+        print(f"  Training complete for {task_name}", flush=True)
         return rep_history, weight_history
     
     def clear_test_cache(self):
