@@ -10,6 +10,7 @@
 #SBATCH --ntasks=1             ### Number of tasks per array job
 #SBATCH --ntasks-per-node=1   ### Nuber of tasks to be launched per Node
 #SBATCH --gpus=1              ### General Reservation of gpu:number of gpus
+#SBATCH --constraint="[gpu-10gb]"
 
 #SBATCH --account=tau  ### Account used for job submission
 #SBATCH --array=0-4           ### Array index
@@ -24,4 +25,6 @@ echo "Job Info: Slurm job ${SLURM_JOB_ID}, array job ${SLURM_ARRAY_JOB_ID}, task
 echo "Running on node: $(hostname)"
 echo "Allocated GPUs: ${CUDA_VISIBLE_DEVICES}"
 python -c "import jax; print(jax.devices())"
+
+nvidia-smi --query-gpu=gpu_name,memory.total --format=csv
 echo "=========================================================="
