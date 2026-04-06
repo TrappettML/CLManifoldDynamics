@@ -1,6 +1,6 @@
 import os
 # os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".70" 
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".90" 
 
 import jax
 import jax.numpy as jnp

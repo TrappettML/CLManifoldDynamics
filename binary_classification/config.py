@@ -1,5 +1,7 @@
 import ml_collections
 import os
+import math
+import jax
 
 def get_config(algorithm, 
                 use_replay=False, 
@@ -29,48 +31,42 @@ def get_config(algorithm,
 
     algo_name += f"_epochs_{num_epochs}_lr1_{lr1}_lr2_{lr2}"
 
-    # Algorithm & Dataset
     config.algorithm = algo_name
     config.dataset_name = dataset_name
     config.seed = 42
     
-    # Directory Structure (Aligned with Spec Section 4)
-    # Spec: results/{dataset}/{algorithm}/task_001/
-    config.data_dir = f"./data/{dataset_name}"  # PyTorch dataset cache
+    config.data_dir = f"./data/{dataset_name}"
     config.results_root = "results"
     
-    # These will now dynamically use the new appended algorithm name (e.g., SL_er_pl)
     config.results_dir = os.path.join("results", dataset_name, config.algorithm)
     config.figures_dir = os.path.join("results", dataset_name, config.algorithm, "plots")
 
-    # Task Configuration
     config.num_tasks = num_tasks
-    
-    # Model & Data
-    # config.input_dim = 28*28 # using imagenet downsampled to 28x28
-    config.input_side = 28 # switch to CNN
+    config.input_side = 28
     config.hidden_dim = 64
     
-    # Optimization
-    config.learning_rate1 = lr1  # features lr
-    config.learning_rate2 = lr2  # classifier readout
+    config.learning_rate1 = lr1
+    config.learning_rate2 = lr2
     config.batch_size = 128
     config.weight_decay = 0.0
     
-    # Training Schedule
     config.epochs_per_task = num_epochs
     config.log_frequency = 10
-    config.n_repeats = 32
+    
+    # --- DYNAMIC REPEATS CALCULATION ---
+    num_devices = jax.local_device_count()
+    base_repeats = 32
+    # Ensure repeats are divisible by number of GPUs (e.g. 3 GPUs -> 33 repeats)
+    config.n_repeats = math.ceil(base_repeats / num_devices) * num_devices
+    # -----------------------------------
     
     if config.epochs_per_task % config.log_frequency != 0:
         raise ValueError("epochs_per_task must be divisible by log_frequency")
     
-    # Early Stopping (Optional)
     config.early_stopping = False
     config.patience = 50
     config.min_delta = 1e-4
     
-    # Analysis Parameters
     config.analysis_subsamples = 200
     config.n_t = 50
     config.metric_type = 'acc'

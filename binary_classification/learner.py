@@ -5,6 +5,7 @@ from functools import partial
 from jax import flatten_util
 import algorithms
 from ipdb import set_trace
+import math
 
 
 class ContinualLearner:
@@ -124,185 +125,199 @@ class ContinualLearner:
 
 
     def train_task(self, task, test_data_dict, global_history):
-        """
-        Trains on a single task using nested jax.lax.scan.
-        
-        Args:
-            task: Dict with keys 'id', 'name', 'data' (tuple of X, Y)
-            test_data_dict: {task_name: (test_X, test_Y)} for all tasks
-            global_history: Dict accumulating metrics across tasks
-            analysis_subset: Optional (sub_X, sub_Y) for representation extraction
-        """
         task_name = task['name']
         print(f"\n=== Training on {task_name} ===")
         
         for h in self.hooks:
             h.on_task_start(task, self.state)
 
-        # Load training data (Canonical: N, R, Side, Side)
         train_imgs, train_lbls = self.preload_data(task['data'])
         
-        # Prepare batches for scan: (Num_Batches, Repeats, Batch_Size, Side, Side)
-        # TODO: fix how this data is split up for training
         n_samples = train_imgs.shape[0]
         n_batches = n_samples // self.config.batch_size
         limit = n_batches * self.config.batch_size
-        # set_trace()
-        # Truncate to divisible limit
+        
         train_imgs = train_imgs[:limit]
         train_lbls = train_lbls[:limit]
         
-        # Reshape: (Limit, R, D) -> (Batches, Batch_Size, R, Side, Side) -> (Batches, R, Batch_Size, Side, Side)
         train_imgs = train_imgs.reshape(n_batches, self.config.batch_size, self.config.n_repeats, self.config.input_side, self.config.input_side)
         train_lbls = train_lbls.reshape(n_batches, self.config.batch_size, self.config.n_repeats, -1)
         
-        # Transpose for efficient vmap: (Batches, R, Batch_Size, Side, Side)
-        epoch_data_imgs = jnp.swapaxes(train_imgs, 1, 2)
-        epoch_data_lbls = jnp.swapaxes(train_lbls, 1, 2)
-        
-        # Move to device
-        epoch_data_imgs = jax.device_put(epoch_data_imgs)
-        epoch_data_lbls = jax.device_put(epoch_data_lbls)
+        epoch_data_imgs = jax.device_put(jnp.swapaxes(train_imgs, 1, 2))
+        epoch_data_lbls = jax.device_put(jnp.swapaxes(train_lbls, 1, 2))
 
-        # Cache test data
         if not hasattr(self, 'cached_test_data'):
             self.cached_test_data = {}
-        
+
         for t_name, t_data in test_data_dict.items():
             self.cached_test_data[t_name] = t_data
         
         test_data_jax = self.cached_test_data
 
-        # --- Sharding Utilities for pmap ---
         def shard_data(x, repeat_axis):
-            """Reshapes (..., R, ...) to (num_devices, ..., R // num_devices, ...)"""
             shape = list(x.shape)
             shape[repeat_axis:repeat_axis+1] = [self.num_devices, self.r_per_dev]
             reshaped = x.reshape(*shape)
             return jnp.swapaxes(reshaped, 0, repeat_axis)
 
         def unshard_data(x, r_axis):
-            """Reverses sharding back to (..., R, ...)"""
             x = jnp.moveaxis(x, 0, r_axis)
             shape = list(x.shape)
             shape[r_axis : r_axis + 2] = [shape[r_axis] * shape[r_axis + 1]]
             return x.reshape(*shape)
 
-        # 1. Shard all inputs across devices
         sharded_state = jax.tree_util.tree_map(lambda x: shard_data(x, 0), self.state)
         sharded_imgs = shard_data(epoch_data_imgs, 1)
         sharded_lbls = shard_data(epoch_data_lbls, 1)
         sharded_test = jax.tree_util.tree_map(lambda x: shard_data(x, 1), test_data_jax)
 
-        # 2. Define the training loop WITHOUT @jax.jit (pmap replaces it)
-        # Note: All arguments here now process 'r_per_dev' instead of 'n_repeats'
-        def nested_task_scan(initial_state, e_imgs, e_lbls, t_data):
-            log_freq = self.config.log_frequency
-            total_epochs = self.config.epochs_per_task
-            n_outer_steps = total_epochs // log_freq
+        # --- EXACT MEMORY CHUNKING ---
+        log_freq = self.config.log_frequency
+        total_outer_steps = self.config.epochs_per_task // log_freq
+        
+        # Get exactly how many parameters we have
+        dummy_flat_params = self.get_flat_params(self.state)[0]
+        num_params = len(dummy_flat_params)
+        
+        # Call the deterministic calculator
+        chunk_size_steps = calculate_safe_chunk_size(
+            device=jax.devices()[0],
+            num_params=num_params,
+            hidden_dim=self.config.hidden_dim,
+            r_per_dev=self.r_per_dev,
+            test_data_jax=test_data_jax,
+            safety_margin=0.50 # Leaves % for XLA computation overhead
+        )
+    
+        num_chunks = math.ceil(total_outer_steps / chunk_size_steps)
+        print(f"  [Memory Manager] Executing {total_outer_steps} total logs across {num_chunks} chunk(s).")
+
+        cpu_history_trees = []
+        curr_state = sharded_state
+
+        for chunk_idx in range(num_chunks):
+            # Calculate static size for this specific chunk (JAX requires static size for scan)
+            steps_in_this_chunk = min(chunk_size_steps, total_outer_steps - chunk_idx * chunk_size_steps)
             
-            def inner_loop(carry, _):
-                new_state, tr_loss, tr_acc = self._train_epoch_jit(carry, e_imgs, e_lbls)
-                return new_state, (tr_loss, tr_acc)
+            # Wrap the scan function so steps_in_this_chunk is baked into the JIT logic
+            def chunked_task_scan(initial_state, e_imgs, e_lbls, t_data):
+                def inner_loop(carry, _):
+                    new_state, tr_loss, tr_acc = self._train_epoch_jit(carry, e_imgs, e_lbls)
+                    return new_state, (tr_loss, tr_acc)
+                
+                def outer_step(carry, _):
+                    state_start = carry
+                    state_end, (block_losses, block_accs) = jax.lax.scan(
+                        inner_loop, state_start, None, length=log_freq
+                    )
+                    
+                    def run_eval(s):
+                        results, all_reps = {}, []
+                        for t_name in sorted(t_data.keys()):
+                            ti, tl = t_data[t_name]
+                            (l, a), reps = self._eval_jit(s, ti, tl)
+                            results[t_name] = (l, a)
+                            all_reps.append(reps)
+                        return results, jnp.stack(all_reps)
+                    
+                    test_metrics_sparse, reps_sparse = run_eval(state_end)
+                    flat_w = self.get_flat_params(state_end)
+                    
+                    metrics = {
+                        'tr_loss': block_losses,
+                        'tr_acc': block_accs,
+                        'test': test_metrics_sparse,
+                        'weights': flat_w,
+                        'reps': reps_sparse
+                    }
+                    return state_end, metrics
+                
+                # Execute for the strict size of this chunk
+                return jax.lax.scan(outer_step, initial_state, jnp.arange(steps_in_this_chunk))
+
+            pmap_scan = jax.pmap(chunked_task_scan, in_axes=(0, 0, 0, 0))
+
+            # Execute Chunk
+            curr_state, sharded_history_chunk = pmap_scan(curr_state, sharded_imgs, sharded_lbls, sharded_test)
+
+            # --- FIX: Move entire chunk to CPU RAM immediately ---
+            chunk_cpu = jax.device_get(sharded_history_chunk)
             
-            def outer_step(carry, _):
-                state_start = carry
-                state_end, (block_losses, block_accs) = jax.lax.scan(
-                    inner_loop, state_start, None, length=log_freq
+            # Explicitly free GPU memory reference for the chunk
+            del sharded_history_chunk
+            
+            # Helper to unshard using NumPy instead of JAX
+            def unshard_numpy(x, r_axis):
+                x = np.moveaxis(x, 0, r_axis)
+                shape = list(x.shape)
+                shape[r_axis : r_axis + 2] = [shape[r_axis] * shape[r_axis + 1]]
+                return x.reshape(*shape)
+
+            # Build the history tree using the CPU data
+            history_tree_cpu = {
+                'tr_loss': unshard_numpy(chunk_cpu['tr_loss'], 2),
+                'tr_acc': unshard_numpy(chunk_cpu['tr_acc'], 2),
+                'weights': unshard_numpy(chunk_cpu['weights'], 1),
+                'reps': unshard_numpy(chunk_cpu['reps'], 2),
+                'test': {}
+            }
+            for t_name in chunk_cpu['test']:
+                history_tree_cpu['test'][t_name] = (
+                    unshard_numpy(chunk_cpu['test'][t_name][0], 1),
+                    unshard_numpy(chunk_cpu['test'][t_name][1], 1)
                 )
                 
-                def run_eval(s):
-                    results, all_reps = {}, []
-                    for t_name in sorted(t_data.keys()):
-                        ti, tl = t_data[t_name]
-                        (l, a), reps = self._eval_jit(s, ti, tl)
-                        results[t_name] = (l, a)
-                        all_reps.append(reps)
-                    return results, jnp.stack(all_reps)
-                
-                test_metrics_sparse, reps_sparse = run_eval(state_end)
-                flat_w = self.get_flat_params(state_end)
-                
-                metrics = {
-                    'tr_loss': block_losses,
-                    'tr_acc': block_accs,
-                    'test': test_metrics_sparse,
-                    'weights': flat_w,
-                    'reps': reps_sparse
-                }
-                return state_end, metrics
-            
-            return jax.lax.scan(outer_step, initial_state, jnp.arange(n_outer_steps))
-        
-        # 3. Apply pmap and execute
-        print(f"  Mapping scan across {self.num_devices} devices...")
-        pmap_scan = jax.pmap(nested_task_scan, in_axes=(0, 0, 0, 0))
-        sharded_final_state, sharded_history = pmap_scan(
-            sharded_state, sharded_imgs, sharded_lbls, sharded_test
-        )
-        
-        # 4. Unshard back to normal shapes for the rest of your pipeline
-        self.state = jax.tree_util.tree_map(lambda x: unshard_data(x, 0), sharded_final_state)
-        
-        # history_tree needs manual unsharding based on where the repeat axis ended up
-        history_tree = {
-            'tr_loss': unshard_data(sharded_history['tr_loss'], 2),
-            'tr_acc': unshard_data(sharded_history['tr_acc'], 2),
-            'weights': unshard_data(sharded_history['weights'], 1),
-            'reps': unshard_data(sharded_history['reps'], 2),
+            cpu_history_trees.append(history_tree_cpu)
+            del chunk_cpu
+
+        self.state = jax.tree_util.tree_map(lambda x: unshard_data(x, 0), curr_state)
+
+        # Re-assemble CPU history trees across chunks
+        history_np = {
+            'tr_loss': np.concatenate([c['tr_loss'] for c in cpu_history_trees], axis=0),
+            'tr_acc': np.concatenate([c['tr_acc'] for c in cpu_history_trees], axis=0),
+            'weights': np.concatenate([c['weights'] for c in cpu_history_trees], axis=0),
+            'reps': np.concatenate([c['reps'] for c in cpu_history_trees], axis=0),
             'test': {}
         }
-        for t_name in sharded_history['test']:
-            history_tree['test'][t_name] = (
-                unshard_data(sharded_history['test'][t_name][0], 1),
-                unshard_data(sharded_history['test'][t_name][1], 1)
+        for t_name in cpu_history_trees[0]['test'].keys():
+            history_np['test'][t_name] = (
+                np.concatenate([c['test'][t_name][0] for c in cpu_history_trees], axis=0),
+                np.concatenate([c['test'][t_name][1] for c in cpu_history_trees], axis=0)
             )
-        
-        
-        # Post-processing: Convert to numpy and format
-        history_np = jax.tree_util.tree_map(np.array, history_tree)
-        
-        # Flatten training metrics: (Outer, Inner, Repeats) -> (Total_Epochs, Repeats)
+
+        # --- Post-processing logic remains exactly the same ---
         tr_loss_dense = history_np['tr_loss'].reshape(-1, self.config.n_repeats)
         tr_acc_dense = history_np['tr_acc'].reshape(-1, self.config.n_repeats)
         
         global_history['train_loss'].extend(tr_loss_dense)
         global_history['train_acc'].extend(tr_acc_dense)
         
-        # Expand sparse test metrics to dense format
         for t_name in history_np['test'].keys():
-            sparse_loss = history_np['test'][t_name][0]  # (Outer, Repeats)
+            sparse_loss = history_np['test'][t_name][0]
             sparse_acc = history_np['test'][t_name][1]
             
             n_outer = sparse_loss.shape[0]
             n_repeats = sparse_loss.shape[1]
             total_block_len = n_outer * self.config.log_frequency
             
-            # Create dense arrays with NaN padding
             dense_loss = np.full((total_block_len, n_repeats), np.nan)
             dense_acc = np.full((total_block_len, n_repeats), np.nan)
             
-            # Place sparse values at log positions
-            eval_indices = np.arange(
-                self.config.log_frequency - 1,
-                total_block_len,
-                self.config.log_frequency
-            )
+            eval_indices = np.arange(self.config.log_frequency - 1, total_block_len, self.config.log_frequency)
             dense_loss[eval_indices] = sparse_loss
             dense_acc[eval_indices] = sparse_acc
             
             global_history['test_metrics'][t_name]['loss'].extend(dense_loss)
             global_history['test_metrics'][t_name]['acc'].extend(dense_acc)
         
-        # Extract histories for saving
-        weight_history = history_np['weights']  # (Outer, Repeats, Param_Dim)
+        weight_history = history_np['weights']
         rep_history = history_np['reps']  
         
         for h in self.hooks:
             h.on_task_end(task, self.state, metrics=None)
         
         print(f"  Training complete for {task_name}")
-        
         return rep_history, weight_history
     
     def clear_test_cache(self):
@@ -310,3 +325,52 @@ class ContinualLearner:
         if hasattr(self, 'cached_test_data'):
             self.cached_test_data.clear()
             print("  Test cache cleared")
+
+
+def calculate_safe_chunk_size(device, num_params, hidden_dim, r_per_dev, test_data_jax, safety_margin=0.85):
+    """
+    Deterministically calculates how many logging steps can safely fit in available VRAM.
+    
+    Args:
+        device: The JAX device to query.
+        num_params: Total number of flattened parameters in the model.
+        hidden_dim: The dimensionality of the hidden representations.
+        r_per_dev: Number of repeats assigned to this specific device.
+        test_data_jax: Dictionary of cached test data arrays.
+        safety_margin: Fraction of free VRAM to use (leaves room for XLA compute buffers).
+    """
+    try:
+        stats = device.memory_stats()
+        free_bytes = stats['bytes_limit'] - stats['bytes_in_use']
+    except Exception as e:
+        print(f"  [Warning] Could not read memory stats ({e}). Defaulting to 4GB margin.")
+        free_bytes = 4 * (1024**3)
+
+    # 1. Size of representations per step: (Repeats * Total_Test_Samples * Hidden_Dim * 4 bytes for float32)
+    total_test_samples = sum(t[0].shape[0] for t in test_data_jax.values())
+    bytes_reps = r_per_dev * total_test_samples * hidden_dim * 4
+    
+    # 2. Size of weights per step: (Repeats * Num_Params * 4 bytes)
+    bytes_weights = r_per_dev * num_params * 4
+    
+    # 3. Size of metrics per step: tr_loss, tr_acc + (te_loss, te_acc per test task)
+    num_test_tasks = len(test_data_jax)
+    bytes_metrics = r_per_dev * (2 + (num_test_tasks * 2)) * 4
+    
+    # Total bytes accumulated per logging step
+    bytes_per_step = bytes_reps + bytes_weights + bytes_metrics
+    
+    if bytes_per_step == 0:
+        return 50 # Fallback if sizes are 0 for some reason
+
+    # Calculate how many steps fit into the safe VRAM allocation
+    safe_free_bytes = free_bytes * safety_margin
+    chunk_size = int(safe_free_bytes / bytes_per_step)
+    
+    # Print a diagnostic summary for the user
+    mb_per_step = bytes_per_step / (1024**2)
+    free_mb = free_bytes / (1024**2)
+    print(f"  [Memory Calc] Free VRAM: {free_mb:.0f} MB | Cost per log step: {mb_per_step:.2f} MB")
+    print(f"  [Memory Calc] Determined max safe chunk size: {chunk_size} logs")
+
+    return max(1, chunk_size)
