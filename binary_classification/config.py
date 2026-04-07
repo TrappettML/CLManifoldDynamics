@@ -38,10 +38,10 @@ def get_config(algorithm,
     
     config.data_dir = f"./data/{dataset_name}"
     config.results_root = "results"
-    
+
     cs_name = socket.gethostname()
     if "talapas" in cs_name:
-        root = "~/tau/manifold/binary_classification"
+        root = "/home/mtrappet/tau/manifold/binary_classification"
         config.data_dir = f"{root}/data/{dataset_name}"
         config.results_root = f"{root}/results"
     
