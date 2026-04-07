@@ -14,7 +14,7 @@ ALGORITHMS=("SL")
 LR1_VALS=("1e-1" "1e-2" "1e-3" "1e-4")
 LR2_VALS=("1e-1" "1e-2" "1e-3" "1e-4")
 NUM_TASKS=("20") # Constant for this particular sweep
-NUM_EPOCHS=("10000")
+NUM_EPOCHS=("4000")
 
 # 2. Initialize empty arrays to hold the exact combinations
 COMBINED_ALG=()
