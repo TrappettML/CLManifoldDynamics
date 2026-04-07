@@ -37,15 +37,15 @@ def get_config(algorithm,
     config.dataset_name = dataset_name
     config.seed = 42
 
-    # cs_name = socket.gethostname()
-    # if "talapas" in cs_name:
-    #     root = "/home/mtrappet/tau/manifold/binary_classification"
-    #     config.data_dir = f"{root}/data/{dataset_name}"
-    #     config.results_root = f"{root}/results"
-    #     print(f"Saving results to ")
-    # else:
-    config.data_dir = f"./data/{dataset_name}"
-    config.results_root = "results"
+    cs_name = socket.gethostname()
+    if "talapas" in cs_name:
+        root = "/home/mtrappet/tau/manifold/binary_classification"
+        config.data_dir = f"{root}/data/{dataset_name}"
+        config.results_root = f"{root}/results"
+        print(f"Saving results to ")
+    else:
+        config.data_dir = f"./data/{dataset_name}"
+        config.results_root = "results"
     
     config.results_dir = os.path.join(config.results_root, dataset_name, config.algorithm)
     config.figures_dir = os.path.join(config.results_root, dataset_name, config.algorithm, "plots")
