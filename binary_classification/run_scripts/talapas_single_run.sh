@@ -11,7 +11,7 @@
 #SBATCH --ntasks-per-node=1   ### Nuber of tasks to be launched per Node
 #SBATCH --gpus=1              ### General Reservation of gpu:number of gpus
 #SBATCH --constraint="[gpu-40gb]"
-#SBATCH --mem=96G
+#SBATCH --mem=128G
 
 #SBATCH --account=tau  ### Account used for job submission
 #SBATCH --array=0-15           ### Array index
