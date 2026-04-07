@@ -13,6 +13,7 @@ def get_config(algorithm,
                 lr1=1e-2, 
                 lr2=1e-4,
                 num_epochs=1000,
+                outdim=1,
                 ) -> ml_collections.ConfigDict:
     config = ml_collections.ConfigDict()
 
@@ -30,20 +31,21 @@ def get_config(algorithm,
     if config.use_ul:
         algo_name += "_ul"
 
-    algo_name += f"_epochs_{num_epochs}_lr1_{lr1}_lr2_{lr2}"
+    algo_name += f"_epochs_{num_epochs}_lr1_{lr1}_lr2_{lr2}_dout_{outdim}"
 
     config.algorithm = algo_name
     config.dataset_name = dataset_name
     config.seed = 42
-    
+
+    # cs_name = socket.gethostname()
+    # if "talapas" in cs_name:
+    #     root = "/home/mtrappet/tau/manifold/binary_classification"
+    #     config.data_dir = f"{root}/data/{dataset_name}"
+    #     config.results_root = f"{root}/results"
+    #     print(f"Saving results to ")
+    # else:
     config.data_dir = f"./data/{dataset_name}"
     config.results_root = "results"
-
-    cs_name = socket.gethostname()
-    if "talapas" in cs_name:
-        root = "/home/mtrappet/tau/manifold/binary_classification"
-        config.data_dir = f"{root}/data/{dataset_name}"
-        config.results_root = f"{root}/results"
     
     config.results_dir = os.path.join(config.results_root, dataset_name, config.algorithm)
     config.figures_dir = os.path.join(config.results_root, dataset_name, config.algorithm, "plots")
@@ -51,6 +53,7 @@ def get_config(algorithm,
     config.num_tasks = num_tasks
     config.input_side = 28
     config.hidden_dim = 64
+    config.output_dim = outdim
     
     config.learning_rate1 = lr1
     config.learning_rate2 = lr2

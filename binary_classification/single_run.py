@@ -87,6 +87,13 @@ def main():
         help="Number of epochs to train per task"
     )
 
+    parser.add_argument(
+        '--out_dim',
+        type=int,
+        default=1,
+        help="Output dimension, increases number of classes when for 2+"
+    )
+
     args = parser.parse_args()
 
     # --- 2. Load Config ---
@@ -99,7 +106,8 @@ def main():
         num_tasks=args.num_tasks,
         lr1=args.lr1,  
         lr2=args.lr2,
-        num_epochs=args.num_epochs
+        num_epochs=args.num_epochs,
+        outdim=args.out_dim
     )
     
     print(f"\n{'='*60}")

@@ -48,9 +48,10 @@ def get_base_data_jax(dataset_name, root, config, train):
     return X_jax, Y_jax
 
 
-def generate_task_class_pairs(num_tasks, n_repeats, num_classes, seed):
+def generate_task_class_pairs(num_tasks, n_repeats, num_classes, seed, n_task_classes=2):
     """
-    PRE-COMPUTES class pairs for all tasks and repeats following the spec.
+    PRE-COMPUTES n_task classes for all tasks and repeats following the spec.
+        Traditionally is binary, only 2 classes for each class.
     
     Spec Requirement (Section 1):
     "Each repeat samples a random permutation of all available classes without replacement."
@@ -67,17 +68,17 @@ def generate_task_class_pairs(num_tasks, n_repeats, num_classes, seed):
     rng = np.random.default_rng(seed)
     
     # Validate that we can form num_tasks pairs from num_classes
-    max_possible_tasks = num_classes // 2
+    max_possible_tasks = num_classes // n_task_classes
     if num_tasks > max_possible_tasks:
         raise ValueError(
             f"Cannot create {num_tasks} tasks from {num_classes} classes. "
             f"Maximum possible: {max_possible_tasks} tasks."
         )
     
-    task_class_pairs = np.zeros((num_tasks, n_repeats, 2), dtype=np.int32)
+    task_class_groups = np.zeros((num_tasks, n_repeats, n_task_classes), dtype=np.int32)
     
     print(f"\n=== Pre-computing Task Class Pairs ===")
-    print(f"Tasks: {num_tasks}, Repeats: {n_repeats}, Classes: {num_classes}")
+    print(f"Tasks: {num_tasks}, Repeats: {n_repeats}, Classes: {num_classes}, N Task Classes: {n_task_classes}")
     
     for r in range(n_repeats):
         # Generate random permutation of all classes for this repeat
@@ -85,12 +86,15 @@ def generate_task_class_pairs(num_tasks, n_repeats, num_classes, seed):
         
         # Pair consecutive classes: [perm[0], perm[1]], [perm[2], perm[3]], ...
         for t in range(num_tasks):
-            class_A = perm[2 * t]
-            class_B = perm[2 * t + 1]
-            task_class_pairs[t, r, 0] = class_A
-            task_class_pairs[t, r, 1] = class_B
+            start_idx = 2*t
+            for i in range(n_task_classes):
+                task_class_groups[t, r, i] = perm[start_idx + i]
+            # class_A = perm[2 * t]
+            # class_B = perm[2 * t + 1]
+            # task_class_groups[t, r, 0] = class_A
+            # task_class_groups[t, r, 1] = class_B
             
-    return task_class_pairs
+    return task_class_groups
 
 
 def create_single_task_data(task_idx, task_class_pairs, X_global, Y_global, config, split='train'):
