@@ -2,6 +2,7 @@ import ml_collections
 import os
 import math
 import jax
+import socket
 
 def get_config(algorithm, 
                 use_replay=False, 
@@ -38,8 +39,14 @@ def get_config(algorithm,
     config.data_dir = f"./data/{dataset_name}"
     config.results_root = "results"
     
-    config.results_dir = os.path.join("results", dataset_name, config.algorithm)
-    config.figures_dir = os.path.join("results", dataset_name, config.algorithm, "plots")
+    cs_name = socket.gethostname()
+    if "talapas" in cs_name:
+        root = "~/tau/manifold/binary_classification"
+        config.data_dir = f"{root}/data/{dataset_name}"
+        config.results_root = f"{root}/results"
+    
+    config.results_dir = os.path.join(config.results_root, dataset_name, config.algorithm)
+    config.figures_dir = os.path.join(config.results_root, dataset_name, config.algorithm, "plots")
 
     config.num_tasks = num_tasks
     config.input_side = 28
