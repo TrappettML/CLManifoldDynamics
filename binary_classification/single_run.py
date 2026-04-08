@@ -267,7 +267,7 @@ def main():
         with open(os.path.join(task_dir, "metrics.pkl"), 'wb') as f:
             pickle.dump(learner_metrics, f)
             
-        data_utils.save_task_metadata(task_idx, task_class_pairs, config)
+        data_utils.save_task_metadata(task_idx, task_class_pairs, config, task_dir)
 
         # ---------------------------------------------------------
         # 4. TRAIN EXPERT (Integrated)

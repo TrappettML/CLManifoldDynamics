@@ -135,7 +135,6 @@ def extract_cl_metric(cl_metrics, metric_name):
         
     return repeat_means
 
-
 def extract_final_acc(global_history, config):
     test_metrics = global_history.get('test_metrics', {})
     n_repeats = get_config_val(config, 'n_repeats', 1)
@@ -162,7 +161,6 @@ def extract_final_acc(global_history, config):
             last_valid_acc = t_acc[last_valid_idx]
             
     return last_valid_acc
-
 
 def process_single_experiment(exp_path, item_name):
     config_path = os.path.join(exp_path, 'config.pkl')
@@ -214,6 +212,7 @@ def process_single_experiment(exp_path, item_name):
     transfer_reps = extract_cl_metric(cl_metrics, 'transfer') if cl_metrics else np.full(1, np.nan)
     final_acc_reps = extract_final_acc(global_history, config)
     rem_reps = extract_cl_metric(cl_metrics, 'remembering') if cl_metrics else np.full(1, np.nan)
+    zero_shot_reps = extract_cl_metric(cl_metrics, 'zero_shot') if cl_metrics else np.full(1, np.nan)
     
     return {
         'x_val': x_val,
@@ -224,6 +223,7 @@ def process_single_experiment(exp_path, item_name):
             'transfer': transfer_reps,
             'final_acc': final_acc_reps,
             'remembering': rem_reps,
+            'zero_shot': zero_shot_reps,
             'epochs_per_task': get_config_val(config, 'epochs_per_task', 1),
             'num_tasks': get_config_val(config, 'num_tasks', 20)
         }
@@ -403,7 +403,8 @@ def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_conf
     ax.set_ylabel(title)
     
     prefix = "Top 4 Configs per Epoch" if target_configs is None else "Selected Configurations"
-    ax.set_title(f"{prefix}: {title}", pad=15)
+    ax.set_title(f"{prefix}: {title}", pad=30)
+    ax.text(0.5, 1.04, "LR1: Features; LR2: Readout", transform=ax.transAxes, ha='center', va='bottom', fontsize=11, color='#555555')
     
     ax.grid(axis='y', linestyle='--', alpha=0.5)
     ax.grid(axis='x', visible=False) 
@@ -491,7 +492,8 @@ def plot_current_task_traces(data_dict, output_path, title, target_configs=None)
             
         ax.legend(loc='lower right', frameon=True)
         
-    fig.suptitle(title, fontsize=16, fontweight='bold')
+    fig.suptitle(title, fontsize=16, fontweight='bold', y=1.06)
+    fig.text(0.5, 1.02, "LR1: Features; LR2: Readout", ha='center', va='bottom', fontsize=12, color='#555555')
     plt.savefig(output_path, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"Saved current task trace plot to {output_path}")
@@ -514,7 +516,6 @@ def plot_heatmaps(data_dict, metric_key, output_path, title):
         return
         
     rows = len(x_vals)
-    # Applied constrained_layout=True to fix colorbar squishing issue
     fig, axes = plt.subplots(rows, 1, figsize=(8, 4 * rows), squeeze=False, constrained_layout=True)
     
     global_min, global_max = np.inf, -np.inf
@@ -558,11 +559,11 @@ def plot_heatmaps(data_dict, metric_key, output_path, title):
                         text_color = "black" if norm(val) > 0.5 else "white"
                         ax.text(j, i, f"{val:.3f}", ha="center", va="center", color=text_color, fontsize=8)
 
-    fig.suptitle(f"{title} Heatmaps Over {X_PARAM}", fontsize=16, fontweight='bold')
+    fig.suptitle(f"{title} Heatmaps Over {X_PARAM}", fontsize=16, fontweight='bold', y=1.06)
+    fig.text(0.5, 1.02, "LR1: Features; LR2: Readout", ha='center', va='bottom', fontsize=12, color='#555555')
     fig.colorbar(im, ax=axes.ravel().tolist(), label=title, shrink=0.3)
     
-    # Removed tight_layout to allow constrained_layout to handle the color bar spacing properly
-    plt.savefig(output_path, dpi=200)
+    plt.savefig(output_path, dpi=200, bbox_inches='tight')
     plt.close()
     print(f"Saved heatmap to {output_path}")
 
@@ -587,12 +588,14 @@ def main():
     plot_grouped_boxplots(data_dict, 'transfer', os.path.join(OUTPUT_DIR, "boxplot_transfer.png"), "Transfer")
     plot_grouped_boxplots(data_dict, 'remembering', os.path.join(OUTPUT_DIR, "boxplot_remembering.png"), "Remembering")
     plot_grouped_boxplots(data_dict, 'final_acc', os.path.join(OUTPUT_DIR, "boxplot_final_accuracy.png"), "Final Accuracy")
+    plot_grouped_boxplots(data_dict, 'zero_shot', os.path.join(OUTPUT_DIR, "boxplot_zero_shot.png"), "Zero-Shot Learning")
     
     # 2. Heatmaps
     plot_heatmaps(data_dict, 'imm_acc', os.path.join(OUTPUT_DIR, "heatmap_immediate_accuracy.png"), "Immediate Accuracy")
     plot_heatmaps(data_dict, 'transfer', os.path.join(OUTPUT_DIR, "heatmap_transfer.png"), "Transfer")
     plot_heatmaps(data_dict, 'remembering', os.path.join(OUTPUT_DIR, "heatmap_remembering.png"), "Remembering")
     plot_heatmaps(data_dict, 'final_acc', os.path.join(OUTPUT_DIR, "heatmap_final_accuracy.png"), "Final Accuracy")
+    plot_heatmaps(data_dict, 'zero_shot', os.path.join(OUTPUT_DIR, "heatmap_zero_shot.png"), "Zero-Shot Learning")
 
     # 3. Dynamic Traces (Finds Top 4 per Epoch)
     plot_current_task_traces(data_dict, os.path.join(OUTPUT_DIR, "trace_current_task_accuracy.png"), "Top 4 Configs: Current Task Accuracy Trace")
@@ -604,6 +607,7 @@ def main():
     plot_grouped_boxplots(data_dict, 'final_acc', os.path.join(OUTPUT_DIR, "boxplot_hardcoded_final_acc.png"), "Final Accuracy", hardcoded_configs)
     plot_grouped_boxplots(data_dict, 'transfer', os.path.join(OUTPUT_DIR, "boxplot_hardcoded_transfer.png"), "Transfer", hardcoded_configs)
     plot_grouped_boxplots(data_dict, 'remembering', os.path.join(OUTPUT_DIR, "boxplot_hardcoded_remembering.png"), "Remembering", hardcoded_configs)
+    plot_grouped_boxplots(data_dict, 'zero_shot', os.path.join(OUTPUT_DIR, "boxplot_hardcoded_zero_shot.png"), "Zero-Shot Learning", hardcoded_configs)
     plot_current_task_traces(data_dict, os.path.join(OUTPUT_DIR, "trace_hardcoded_current_task_accuracy.png"), "Selected Configs: Current Task Accuracy Trace", hardcoded_configs)
 
     print("\nComplete! All grid search plots have been generated.")

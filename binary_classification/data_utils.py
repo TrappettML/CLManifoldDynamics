@@ -188,13 +188,7 @@ def preload_all_test_data(task_class_pairs, X_global, Y_global, config):
     return test_data_dict
 
 
-def save_task_metadata(task_idx, task_class_pairs, config, additional_info=None):
-    """
-    Saves metadata.json as specified in Section 4.
-    """
-    task_dir = os.path.join("results", config.dataset_name, config.algorithm, f"task_{task_idx:03d}")
-    os.makedirs(task_dir, exist_ok=True)
-    
+def save_task_metadata(task_idx, task_class_pairs, config, task_dir, additional_info=None):
     # Extract class pairs for this specific task
     pairs_for_task = []
     for r in range(config.n_repeats):
