@@ -8,7 +8,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm  
 from ipdb import set_trace
 import re
-
+from scipy.stats import mannwhitneyu
 
 def get_config_val(config, key, default=None):
     """Safely fetch a value whether config is a dict or an object."""
@@ -250,8 +250,7 @@ def get_mean_sem(reps_array):
 def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_configs=None):
     """
     Creates a grouped box plot. For each `x_val` (e.g. num_epochs), it plots boxes 
-    for the top configurations. If `target_configs` is None, it dynamically finds 
-    the top 4 configurations for each specific epoch based on the provided metric.
+    for the top configurations. Runs Mann-Whitney U test between boxes and applies brackets.
     """
     if not data_dict:
         return
@@ -261,7 +260,6 @@ def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_conf
     num_groups = len(x_vals)
     configs_per_group = 4 if target_configs is None else len(target_configs)
     
-    # Calculate a responsive figure width based on the number of groups/boxes
     fig_width = max(12, num_groups * configs_per_group * 0.7)
     fig, ax = plt.subplots(figsize=(fig_width, 7))
     
@@ -271,17 +269,17 @@ def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_conf
     all_positions = []
     all_data = []
     all_labels = []
+    valid_colors = []
     
     x_ticks_positions = []
     x_ticks_labels = []
+    groups_info = [] # Tracks valid data per group for statistical testing
     
     current_x = 0
     cmap = plt.get_cmap('tab10')
-    colors_for_boxes = []
     
     for x in x_vals:
         if target_configs is None:
-            # Dynamically sort configs at this specific epoch
             configs = data_dict[x]
             ranked = sorted(
                 configs.keys(), 
@@ -296,50 +294,93 @@ def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_conf
             continue
             
         group_positions = []
-        for i, cfg in enumerate(configs_to_plot):
-            pos = current_x + i * box_width
-            group_positions.append(pos)
-            all_positions.append(pos)
-            
-            reps = data_dict[x][cfg][metric_key]
-            all_data.append(reps)
-            
-            # Formulate the angled label for the individual bar
-            all_labels.append(f"lr1={cfg[0]}\nlr2={cfg[1]}")
-            colors_for_boxes.append(cmap(i % 10))
-            
-        x_ticks_positions.append(np.mean(group_positions))
-        x_ticks_labels.append(f"{X_PARAM.replace('_', ' ').title()} = {x}")
+        group_data_clean = []
         
+        for i, cfg in enumerate(configs_to_plot):
+            reps = data_dict[x][cfg][metric_key]
+            
+            if reps is not None:
+                d_clean = reps[~np.isnan(reps)]
+                if len(d_clean) > 0:
+                    pos = current_x + i * box_width
+                    
+                    group_positions.append(pos)
+                    group_data_clean.append(d_clean)
+                    
+                    all_positions.append(pos)
+                    all_data.append(d_clean)
+                    all_labels.append(f"lr1={cfg[0]}\nlr2={cfg[1]}")
+                    valid_colors.append(cmap(i % 10))
+            
+        if group_positions:
+            groups_info.append({'positions': group_positions, 'data': group_data_clean})
+            x_ticks_positions.append(np.mean(group_positions))
+            x_ticks_labels.append(f"{X_PARAM.replace('_', ' ').title()} = {x}")
+            
         current_x += (len(configs_to_plot) * box_width) + group_spacing
 
     if not all_positions:
         plt.close()
         return
 
-    # Filter out NaNs for matplotlib's boxplot to avoid errors while maintaining alignment
-    valid_data = []
-    valid_positions = []
-    valid_colors = []
-    for d, p, c in zip(all_data, all_positions, colors_for_boxes):
-        if d is not None:
-            d_clean = d[~np.isnan(d)]
-            if len(d_clean) > 0:
-                valid_data.append(d_clean)
-                valid_positions.append(p)
-                valid_colors.append(c)
+    bp = ax.boxplot(all_data, positions=all_positions, widths=box_width*0.8, patch_artist=True)
+    for patch, color in zip(bp['boxes'], valid_colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
 
-    if valid_data:
-        bp = ax.boxplot(valid_data, positions=valid_positions, widths=box_width*0.8, patch_artist=True)
-        for patch, color in zip(bp['boxes'], valid_colors):
-            patch.set_facecolor(color)
-            patch.set_alpha(0.7)
+    # --- Statistical Testing & Annotations ---
+    y_min, y_max = ax.get_ylim()
+    y_range = y_max - y_min
+    new_y_max = y_max
+
+    for grp in groups_info:
+        g_pos = grp['positions']
+        g_dat = grp['data']
+        n_boxes = len(g_pos)
+        
+        if n_boxes < 2:
+            continue
             
-    # Place angled configuration labels under each bar
+        group_max = max([np.max(d) for d in g_dat])
+        bracket_level = 0
+        
+        # Pairwise comparisons using Mann-Whitney U test
+        for i in range(n_boxes):
+            for j in range(i+1, n_boxes):
+                if len(g_dat[i]) < 2 or len(g_dat[j]) < 2:
+                    continue
+                try:
+                    stat, p_val = mannwhitneyu(g_dat[i], g_dat[j], alternative='two-sided')
+                except ValueError:
+                    continue # Failsafe if data is uniform
+                    
+                if p_val < 0.05:
+                    if p_val < 0.001: ast = '***'
+                    elif p_val < 0.01: ast = '**'
+                    else: ast = '*'
+                    
+                    x1, x2 = g_pos[i], g_pos[j]
+                    
+                    # Calculate stacked height for this bracket
+                    y = group_max + (bracket_level + 1) * (0.05 * y_range)
+                    h = 0.01 * y_range
+                    
+                    ax.plot([x1, x1, x2, x2], [y, y+h, y+h, y], lw=1.2, c='k')
+                    ax.text((x1+x2)*.5, y+h, ast, ha='center', va='bottom', color='k', fontsize=10)
+                    
+                    bracket_level += 1
+                    
+                    current_top = y + h + 0.05 * y_range
+                    if current_top > new_y_max:
+                        new_y_max = current_top
+
+    # Adjust y-limit to accommodate the brackets
+    ax.set_ylim(y_min, new_y_max + (0.05 * y_range))
+    # -----------------------------------------
+
     ax.set_xticks(all_positions)
     ax.set_xticklabels(all_labels, rotation=45, ha='right', fontsize=9)
     
-    # Place main epoch axis labels grouped beneath the angled configuration labels
     for pos, label in zip(x_ticks_positions, x_ticks_labels):
         ax.annotate(label, xy=(pos, 0), xytext=(0, -75),
                     xycoords=('data', 'axes fraction'), textcoords='offset points',
@@ -358,7 +399,8 @@ def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_conf
     
     plt.savefig(output_path, dpi=200, bbox_inches='tight')
     plt.close()
-    print(f"Saved grouped box plot to {output_path}")
+    print(f"Saved grouped box plot with stats to {output_path}")
+
 
 def plot_heatmaps(data_dict, metric_key, output_path, title):
     if not data_dict:
@@ -458,7 +500,7 @@ def main():
     plot_heatmaps(data_dict, 'final_acc', os.path.join(OUTPUT_DIR, "heatmap_final_accuracy.png"), "Final Accuracy")
 
     # 3. Hardcoded Box Plots
-    hardcoded_configs = [(0.0001, 0.01), (0.001, 0.001), (0.01, 0.0001), (0.01, 0.01)]
+    hardcoded_configs = [(0.0001, 0.01), (0.001, 0.001), (0.01, 0.0001), (0.01, 0.01), (0.1, 0.1)]
     
     plot_grouped_boxplots(data_dict, 'imm_acc', os.path.join(OUTPUT_DIR, "boxplot_hardcoded_imm_acc.png"), "Immediate Accuracy", hardcoded_configs)
     plot_grouped_boxplots(data_dict, 'final_acc', os.path.join(OUTPUT_DIR, "boxplot_hardcoded_final_acc.png"), "Final Accuracy", hardcoded_configs)
