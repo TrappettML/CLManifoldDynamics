@@ -91,6 +91,34 @@ def extract_immediate_acc(global_history, config):
         
     return repeat_means
 
+def extract_current_task_trace(global_history, config):
+    """Stitches together the test accuracy of the CURRENT training task over all epochs."""
+    test_metrics = global_history.get('test_metrics', {})
+    n_repeats = get_config_val(config, 'n_repeats', 1)
+    epochs_per_task = get_config_val(config, 'epochs_per_task', 1)
+    num_tasks = get_config_val(config, 'num_tasks', 20)
+    
+    total_epochs = epochs_per_task * num_tasks
+    stitched_trace = np.full((total_epochs, n_repeats), np.nan)
+    
+    for t in range(num_tasks):
+        t_name = f"task_{t:03d}"
+        if t_name not in test_metrics:
+            continue
+            
+        t_acc = np.array(test_metrics[t_name]['acc'])
+        if t_acc.ndim == 1:
+            t_acc = t_acc.reshape(-1, n_repeats)
+            
+        start_idx = t * epochs_per_task
+        end_idx = min((t + 1) * epochs_per_task, len(t_acc))
+        
+        trace_len = end_idx - start_idx
+        if trace_len > 0:
+            stitched_trace[start_idx:start_idx+trace_len] = t_acc[start_idx:end_idx]
+            
+    return stitched_trace
+
 def extract_cl_metric(cl_metrics, metric_name):
     if metric_name not in cl_metrics:
         return None
@@ -191,6 +219,7 @@ def process_single_experiment(exp_path, item_name):
     config_key = (lr1, lr2)
     
     imm_acc_reps = extract_immediate_acc(global_history, config)
+    current_trace_reps = extract_current_task_trace(global_history, config)
     transfer_reps = extract_cl_metric(cl_metrics, 'transfer') if cl_metrics else np.full(1, np.nan)
     final_acc_reps = extract_final_acc(global_history, config)
     rem_reps = extract_cl_metric(cl_metrics, 'remembering') if cl_metrics else np.full(1, np.nan)
@@ -200,9 +229,12 @@ def process_single_experiment(exp_path, item_name):
         'config_key': config_key,
         'data': {
             'imm_acc': imm_acc_reps,
+            'current_trace': current_trace_reps,
             'transfer': transfer_reps,
             'final_acc': final_acc_reps,
-            'remembering': rem_reps
+            'remembering': rem_reps,
+            'epochs_per_task': get_config_val(config, 'epochs_per_task', 1),
+            'num_tasks': get_config_val(config, 'num_tasks', 20)
         }
     }
 
@@ -248,10 +280,6 @@ def get_mean_sem(reps_array):
     return mean, sem
 
 def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_configs=None):
-    """
-    Creates a grouped box plot. For each `x_val` (e.g. num_epochs), it plots boxes 
-    for the top configurations. Runs Mann-Whitney U test between boxes and applies brackets.
-    """
     if not data_dict:
         return
         
@@ -273,7 +301,7 @@ def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_conf
     
     x_ticks_positions = []
     x_ticks_labels = []
-    groups_info = [] # Tracks valid data per group for statistical testing
+    groups_info = [] 
     
     current_x = 0
     cmap = plt.get_cmap('tab10')
@@ -328,7 +356,6 @@ def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_conf
         patch.set_facecolor(color)
         patch.set_alpha(0.7)
 
-    # --- Statistical Testing & Annotations ---
     y_min, y_max = ax.get_ylim()
     y_range = y_max - y_min
     new_y_max = y_max
@@ -344,7 +371,6 @@ def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_conf
         group_max = max([np.max(d) for d in g_dat])
         bracket_level = 0
         
-        # Pairwise comparisons using Mann-Whitney U test
         for i in range(n_boxes):
             for j in range(i+1, n_boxes):
                 if len(g_dat[i]) < 2 or len(g_dat[j]) < 2:
@@ -352,7 +378,7 @@ def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_conf
                 try:
                     stat, p_val = mannwhitneyu(g_dat[i], g_dat[j], alternative='two-sided')
                 except ValueError:
-                    continue # Failsafe if data is uniform
+                    continue
                     
                 if p_val < 0.05:
                     if p_val < 0.001: ast = '***'
@@ -361,7 +387,6 @@ def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_conf
                     
                     x1, x2 = g_pos[i], g_pos[j]
                     
-                    # Calculate stacked height for this bracket
                     y = group_max + (bracket_level + 1) * (0.05 * y_range)
                     h = 0.01 * y_range
                     
@@ -374,10 +399,7 @@ def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_conf
                     if current_top > new_y_max:
                         new_y_max = current_top
 
-    # Adjust y-limit to accommodate the brackets
     ax.set_ylim(y_min, new_y_max + (0.05 * y_range))
-    # -----------------------------------------
-
     ax.set_xticks(all_positions)
     ax.set_xticklabels(all_labels, rotation=45, ha='right', fontsize=9)
     
@@ -401,6 +423,87 @@ def plot_grouped_boxplots(data_dict, metric_key, output_path, title, target_conf
     plt.close()
     print(f"Saved grouped box plot with stats to {output_path}")
 
+def plot_current_task_traces(data_dict, output_path, title, target_configs=None):
+    if not data_dict:
+        return
+        
+    x_vals = sorted(list(data_dict.keys()))
+    num_rows = len(x_vals)
+    
+    fig, axes = plt.subplots(num_rows, 1, figsize=(12, 4 * num_rows), squeeze=False, constrained_layout=True)
+    cmap = plt.get_cmap('tab10')
+    
+    for r, x in enumerate(x_vals):
+        ax = axes[r, 0]
+        
+        if target_configs is None:
+            configs = data_dict[x]
+            ranked = sorted(
+                configs.keys(), 
+                key=lambda k: get_mean_sem(configs[k]['imm_acc'])[0], 
+                reverse=True
+            )
+            configs_to_plot = ranked[:4]
+        else:
+            configs_to_plot = [cfg for cfg in target_configs if cfg in data_dict[x]]
+            
+        max_x = 0
+        epochs_per_task = None
+        num_tasks = 20
+        
+        for i, cfg in enumerate(configs_to_plot):
+            trace_data = data_dict[x][cfg].get('current_trace')
+            if trace_data is None or np.all(np.isnan(trace_data)):
+                continue
+                
+            epochs_per_task = data_dict[x][cfg].get('epochs_per_task', epochs_per_task)
+            num_tasks = data_dict[x][cfg].get('num_tasks', num_tasks)
+                
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                mean_trace = np.nanmean(trace_data, axis=1)
+                std_trace = np.nanstd(trace_data, axis=1)
+                valid_counts = np.sum(~np.isnan(trace_data), axis=1)
+                valid_counts = np.where(valid_counts == 0, 1, valid_counts)
+                sem_trace = std_trace / np.sqrt(valid_counts)
+                
+            epochs = np.arange(len(mean_trace))
+            mask = ~np.isnan(mean_trace)
+            
+            if mask.any():
+                label = f"lr1={cfg[0]}, lr2={cfg[1]}"
+                color = cmap(i % 10)
+                ax.plot(epochs[mask], mean_trace[mask], label=label, color=color, linewidth=2)
+                ax.fill_between(
+                    epochs[mask], 
+                    (mean_trace - sem_trace)[mask], 
+                    (mean_trace + sem_trace)[mask], 
+                    color=color, alpha=0.15, linewidth=0
+                )
+                max_x = max(max_x, epochs[mask][-1] if len(epochs[mask]) > 0 else 0)
+        
+        ax.set_title(f"{X_PARAM.replace('_', ' ').title()} = {x}", fontweight='bold')
+        ax.set_ylabel("Current Task Accuracy")
+        ax.set_xlim(0, max_x)
+        
+        if epochs_per_task is not None:
+            for t in range(1, num_tasks):
+                boundary = t * epochs_per_task
+                if boundary < max_x:
+                    ax.axvline(x=boundary, color='#333333', linestyle=':', alpha=0.6, linewidth=1.5)
+                    if r == 0:
+                        ax.text(boundary + (max_x * 0.01), ax.get_ylim()[0], f"Task {t+1}", 
+                                rotation=90, verticalalignment='bottom', fontsize=10, color='#555555')
+                
+        if r == num_rows - 1:
+            ax.set_xlabel("Total Epochs")
+            
+        ax.legend(loc='lower right', frameon=True)
+        
+    fig.suptitle(title, fontsize=16, fontweight='bold')
+    plt.savefig(output_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"Saved current task trace plot to {output_path}")
 
 def plot_heatmaps(data_dict, metric_key, output_path, title):
     if not data_dict:
@@ -420,7 +523,8 @@ def plot_heatmaps(data_dict, metric_key, output_path, title):
         return
         
     rows = len(x_vals)
-    fig, axes = plt.subplots(rows, 1, figsize=(8, 4 * rows), squeeze=False)
+    # Applied constrained_layout=True to fix colorbar squishing issue
+    fig, axes = plt.subplots(rows, 1, figsize=(8, 4 * rows), squeeze=False, constrained_layout=True)
     
     global_min, global_max = np.inf, -np.inf
     for x in x_vals:
@@ -463,10 +567,10 @@ def plot_heatmaps(data_dict, metric_key, output_path, title):
                         text_color = "black" if norm(val) > 0.5 else "white"
                         ax.text(j, i, f"{val:.3f}", ha="center", va="center", color=text_color, fontsize=8)
 
-    fig.suptitle(f"{title} Heatmaps Over {X_PARAM}", fontsize=16, fontweight='bold', y=0.98)
-    fig.colorbar(im, ax=axes.ravel().tolist(), label=title)
+    fig.suptitle(f"{title} Heatmaps Over {X_PARAM}", fontsize=16, fontweight='bold')
+    fig.colorbar(im, ax=axes.ravel().tolist(), label=title, shrink=0.3)
     
-    plt.tight_layout(rect=[0, 0, 0.95, 0.95])
+    # Removed tight_layout to allow constrained_layout to handle the color bar spacing properly
     plt.savefig(output_path, dpi=200)
     plt.close()
     print(f"Saved heatmap to {output_path}")
@@ -499,13 +603,17 @@ def main():
     plot_heatmaps(data_dict, 'remembering', os.path.join(OUTPUT_DIR, "heatmap_remembering.png"), "Remembering")
     plot_heatmaps(data_dict, 'final_acc', os.path.join(OUTPUT_DIR, "heatmap_final_accuracy.png"), "Final Accuracy")
 
-    # 3. Hardcoded Box Plots
+    # 3. Dynamic Traces (Finds Top 4 per Epoch)
+    plot_current_task_traces(data_dict, os.path.join(OUTPUT_DIR, "trace_current_task_accuracy.png"), "Top 4 Configs: Current Task Accuracy Trace")
+
+    # 4. Hardcoded Configurations
     hardcoded_configs = [(0.0001, 0.01), (0.001, 0.001), (0.01, 0.0001), (0.01, 0.01), (0.1, 0.1)]
     
     plot_grouped_boxplots(data_dict, 'imm_acc', os.path.join(OUTPUT_DIR, "boxplot_hardcoded_imm_acc.png"), "Immediate Accuracy", hardcoded_configs)
     plot_grouped_boxplots(data_dict, 'final_acc', os.path.join(OUTPUT_DIR, "boxplot_hardcoded_final_acc.png"), "Final Accuracy", hardcoded_configs)
     plot_grouped_boxplots(data_dict, 'transfer', os.path.join(OUTPUT_DIR, "boxplot_hardcoded_transfer.png"), "Transfer", hardcoded_configs)
     plot_grouped_boxplots(data_dict, 'remembering', os.path.join(OUTPUT_DIR, "boxplot_hardcoded_remembering.png"), "Remembering", hardcoded_configs)
+    plot_current_task_traces(data_dict, os.path.join(OUTPUT_DIR, "trace_hardcoded_current_task_accuracy.png"), "Selected Configs: Current Task Accuracy Trace", hardcoded_configs)
 
     print("\nComplete! All grid search plots have been generated.")
 
