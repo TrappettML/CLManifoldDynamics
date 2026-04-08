@@ -141,36 +141,27 @@ def extract_final_acc(global_history, config):
     n_repeats = get_config_val(config, 'n_repeats', 1)
     num_tasks = get_config_val(config, 'num_tasks', 20)
     
-    extracted_accs = [] 
-
-    for t in range(num_tasks):
-        t_name = f"task_{t:03d}"
-        if t_name not in test_metrics:
-            continue
-            
-        t_acc = np.array(test_metrics[t_name]['acc'])
-        if t_acc.ndim == 1:
-            t_acc = t_acc.reshape(-1, n_repeats)
-            
-        last_valid_acc = np.full(n_repeats, np.nan)
-        if len(t_acc) > 0:
-            valid_mask = ~np.isnan(t_acc)
-            has_valid = valid_mask.any(axis=1)
-            if has_valid.any():
-                last_valid_idx = np.where(has_valid)[0][-1]
-                last_valid_acc = t_acc[last_valid_idx]
-                
-        extracted_accs.append(last_valid_acc)
-        
-    if not extracted_accs:
+    # Identify the final task
+    final_task_idx = num_tasks - 1
+    t_name = f"task_{final_task_idx:03d}"
+    
+    # Return NaNs if the final task isn't present
+    if t_name not in test_metrics:
         return np.full(n_repeats, np.nan)
         
-    acc_matrix = np.array(extracted_accs)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        repeat_means = np.nanmean(acc_matrix, axis=0) 
+    t_acc = np.array(test_metrics[t_name]['acc'])
+    if t_acc.ndim == 1:
+        t_acc = t_acc.reshape(-1, n_repeats)
         
-    return repeat_means
+    last_valid_acc = np.full(n_repeats, np.nan)
+    if len(t_acc) > 0:
+        valid_mask = ~np.isnan(t_acc)
+        has_valid = valid_mask.any(axis=1)
+        if has_valid.any():
+            last_valid_idx = np.where(has_valid)[0][-1]
+            last_valid_acc = t_acc[last_valid_idx]
+            
+    return last_valid_acc
 
 
 def process_single_experiment(exp_path, item_name):
