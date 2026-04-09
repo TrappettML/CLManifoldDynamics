@@ -73,7 +73,7 @@ class ContinualLearner:
         Args:
             state: Vectorized state (Repeats, ...)
             batch_images: (Num_Batches, Repeats, Batch_Size, Side, Side)
-            batch_labels: (Num_Batches, Repeats, Batch_Size, 1)
+            batch_labels: (Num_Batches, Repeats, Batch_Size, output_dim)
         
         Returns:
             final_state: Updated state
@@ -106,7 +106,7 @@ class ContinualLearner:
         Args:
             state: Vectorized state (Repeats, ...)
             images: (Total_Samples, Repeats, Dim) - Canonical format
-            labels: (Total_Samples, Repeats, 1)
+            labels: (Total_Samples, Repeats, Out_dim)
         
         Returns:
             loss: (Repeats,)

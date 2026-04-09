@@ -5,9 +5,27 @@ from flax import traverse_util
 from models import TwoLayerMLP, TrainState, CNN
 from typing import Tuple, Any
 
+def single_dim_optim(logits, labels):
+    loss = optax.sigmoid_binary_cross_entropy(logits, labels).mean()
+    preds = (logits > 0).astype(jnp.float32)
+    return preds, loss
+
+def multi_dim_optim(logits, labels):
+    # labels from data_utils are shape (..., 1), so we squeeze the last dim for integer CE
+    labels_int = labels.squeeze(-1).astype(jnp.int32)
+    loss = optax.softmax_cross_entropy_with_integer_labels(logits, labels_int).mean()
+    # Keep dims so preds shape matches labels shape (..., 1) for accuracy calculation
+    preds = jnp.argmax(logits, axis=-1, keepdims=True).astype(jnp.float32)
+    return preds, loss
+
+
 class BaseAlgorithm:
     def __init__(self, config):
         self.config = config
+        self._dim_optim = multi_dim_optim
+        if config.output_dim < 2:
+            self._dim_optim = single_dim_optim
+
 
     def _build_optimizer(self, params):
         """Shared logic for creating partitioned optimizers."""
@@ -29,8 +47,7 @@ class BaseAlgorithm:
         images, labels = batch
         images = jnp.expand_dims(images, axis=-1)
         logits, h_reps = state.apply_fn({'params': state.params}, images)
-        loss = optax.sigmoid_binary_cross_entropy(logits, labels).mean()
-        preds = (logits > 0).astype(jnp.float32)
+        preds, loss = self._dim_optim(logits, labels)
         acc = jnp.mean(preds == labels)
         return (loss, acc), h_reps
 
