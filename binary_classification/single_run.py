@@ -131,6 +131,7 @@ def main():
         pickle.dump(config, f)
     print(f"Configuration saved to {os.path.join(config.results_dir, 'config.pkl')}")
     # ----------------------
+    n_task_classes = max(2, config.output_dim)
 
     # --- 3. PHASE 1: Pre-compute Class Pairs (Spec Section 2) ---
     num_classes = data_utils.DATASET_CONFIGS[config.dataset_name]['num_classes']
@@ -138,7 +139,8 @@ def main():
         config.num_tasks,
         config.n_repeats,
         num_classes,
-        config.seed
+        config.seed,
+        n_task_classes=n_task_classes
     )
 
     # --- 4. PHASE 2: Load Global Datasets (Once) ---
