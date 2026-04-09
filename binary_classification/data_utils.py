@@ -61,9 +61,10 @@ def generate_task_class_pairs(num_tasks, n_repeats, num_classes, seed, n_task_cl
         n_repeats: Number of parallel repeats (R)
         num_classes: Total classes in dataset
         seed: Random seed for reproducibility
-        
+        n_task_classes: number of classes to be classified per task (default binary classification), D_out
+    
     Returns:
-        task_class_pairs: Shape (T, R, 2) - [task_idx, repeat_idx] = (class_A, class_B)
+        task_class_pairs: Shape (T, R, D_out) -> [task_idx, repeat_idx] = (class_A, class_B, .., class_D_out)
     """
     rng = np.random.default_rng(seed)
     
@@ -89,10 +90,6 @@ def generate_task_class_pairs(num_tasks, n_repeats, num_classes, seed, n_task_cl
             start_idx = 2*t
             for i in range(n_task_classes):
                 task_class_groups[t, r, i] = perm[start_idx + i]
-            # class_A = perm[2 * t]
-            # class_B = perm[2 * t + 1]
-            # task_class_groups[t, r, 0] = class_A
-            # task_class_groups[t, r, 1] = class_B
             
     return task_class_groups
 
