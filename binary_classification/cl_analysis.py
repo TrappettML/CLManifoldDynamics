@@ -90,6 +90,7 @@ def calculate_expert_vector(expert_histories_dict, task_names, metric_type, log_
         E_list.append(val)
         
     return jnp.stack(E_list, axis=0) # (N_Tasks, N_Repeats)
+
 def compute_and_log_cl_metrics(global_history, expert_histories, config):
     """
     Computes Remembering, Transfer, and Zero-Shot Learning. 
@@ -126,7 +127,7 @@ def compute_and_log_cl_metrics(global_history, expert_histories, config):
     m_diag_expanded = jnp.expand_dims(m_diag, 1)
     
     # (M_ii - M_ij) / (M_ii + M_ij)
-    rem_matrix_full = (m_diag_expanded - M) / (m_diag_expanded + M + eps)
+    rem_matrix_full = (m_diag_expanded - M) # / (m_diag_expanded + M + eps) # remove scaling to get absolute difference
     
     # Extract Upper Triangle (j > i) for valid Remembering scores
     mask_rem = jnp.triu(jnp.ones((n_tasks, n_tasks)), k=1)

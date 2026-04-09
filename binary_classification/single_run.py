@@ -312,23 +312,7 @@ def main():
         print(f"  [Memory] Training data for {task_name} cleared", flush=True)
 
     learner.clear_test_cache()
-    
-    # TODO: Remove multitask learn and move to a standalone
-    # ---------------------------------------------------------
-    # Train Multi-Task Learner
-    # ---------------------------------------------------------
-    # Uses the global training data and the analysis subset created earlier
 
-    # train_multitask(
-    #     config, 
-    #     task_class_pairs, 
-    #     X_train_global, 
-    #     Y_train_global, 
-    #     test_data_dict, 
-    # )
-    # ---------------------------------------------------------
-    # CL Metrics
-    # ---------------------------------------------------------
     cl_results = cl_analysis.compute_and_log_cl_metrics(
         global_history, expert_histories, config
     )

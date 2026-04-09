@@ -22,9 +22,13 @@ def train_single_expert(config, train_task, test_data):
     """
     task_name = train_task['name']
     print(f"\n--- Training Expert on {task_name} ---")
+
+    expert_config = deepcopy(config)
+    expert_config.learning_rate1 = expert_config.expert_lr
+    expert_config.learning_rate2 = expert_config.expert_lr
     
     # Initialize fresh learner
-    learner = ContinualLearner(config)
+    learner = ContinualLearner(expert_config)
     
     # Preload data (Canonical: Total, Repeats, Dim)
     train_imgs, train_lbls = learner.preload_data(train_task['data'])

@@ -57,6 +57,7 @@ def get_config(algorithm,
     
     config.learning_rate1 = lr1
     config.learning_rate2 = lr2
+    config.expert_lr = 1e-1
     config.batch_size = 128
     config.weight_decay = 0.0
     
