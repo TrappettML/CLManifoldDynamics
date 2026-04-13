@@ -249,6 +249,8 @@ def load_grid_search_data_parallel(base_dir):
             result = future.result()
             if result is not None:
                 x_val = result['x_val']
+                if x_val in [2000, 3000, 4000]:
+                    continue
                 config_key = result['config_key']
                 
                 if x_val not in data_dict:
