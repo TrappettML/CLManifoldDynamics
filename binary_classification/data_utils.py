@@ -87,7 +87,7 @@ def generate_task_class_pairs(num_tasks, n_repeats, num_classes, seed, n_task_cl
         
         # Pair consecutive classes: [perm[0], perm[1]], [perm[2], perm[3]], ...
         for t in range(num_tasks):
-            start_idx = 2*t
+            start_idx = n_task_classes*t
             for i in range(n_task_classes):
                 task_class_groups[t, r, i] = perm[start_idx + i]
             

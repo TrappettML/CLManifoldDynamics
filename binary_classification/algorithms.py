@@ -65,7 +65,7 @@ class BaseAlgorithm:
 
 class SupervisedLearning(BaseAlgorithm):
     def init_vectorized_state(self, rng: jax.Array, input_side: int) -> TrainState:
-        model = CNN(hidden_dim=self.config.hidden_dim)
+        model = CNN(hidden_dim=self.config.hidden_dim, output_dim=self.config.output_dim)
         
         def init_single_state(key):
             dummy_input = jnp.ones((1, input_side, input_side, 1)) # make sure to add channel
@@ -84,7 +84,7 @@ class SupervisedLearning(BaseAlgorithm):
 
         def loss_fn(params):
             logits, h_reps = state.apply_fn({'params': params}, b_img)
-            loss = optax.sigmoid_binary_cross_entropy(logits, b_lbl).mean()
+            _, loss = self._dim_optim(logits, b_lbl) # mean occurs in _dim_optim
             return loss, logits
 
         grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
@@ -97,12 +97,49 @@ class SupervisedLearning(BaseAlgorithm):
         return new_state, (loss, acc)
 
 
+
+def rl_binary_step_logic(logits, b_lbl, key_sample):
+    probs = jax.nn.sigmoid(logits)
+    u_rand = jax.random.uniform(key_sample, shape=logits.shape)
+    actions = (u_rand < probs).astype(jnp.float32)
+    rewards = (actions == b_lbl).astype(jnp.float32)
+    
+    neg_log_prob = optax.sigmoid_binary_cross_entropy(logits, actions)
+    loss = jnp.mean(jax.lax.stop_gradient(rewards) * neg_log_prob)
+    
+    greedy_preds = (logits > 0).astype(jnp.float32)
+    acc = jnp.mean(greedy_preds == b_lbl)
+    
+    return loss, acc
+
+def rl_multi_step_logic(logits, b_lbl, key_sample):
+    actions = jax.random.categorical(key_sample, logits, axis=-1)
+    
+    b_lbl_sq = b_lbl.squeeze(-1) 
+    rewards = (actions == b_lbl_sq).astype(jnp.float32)
+    
+    neg_log_prob = optax.softmax_cross_entropy_with_integer_labels(logits, actions)
+    loss = jnp.mean(jax.lax.stop_gradient(rewards) * neg_log_prob)
+    
+    greedy_preds = jnp.argmax(logits, axis=-1)
+    acc = jnp.mean(greedy_preds == b_lbl_sq)
+    
+    return loss, acc
+
 class RLTrainState(TrainState):
     rng: jax.Array
-
+    
 class ReinforcementLearning(BaseAlgorithm):
+    def __init__(self, config):
+        super().__init__(config)
+        
+        if self.config.output_dim < 2:
+            self._rl_step_logic = rl_binary_step_logic
+        else:
+            self._rl_step_logic = rl_multi_step_logic
+
     def init_vectorized_state(self, rng: jax.Array, input_side: int) -> RLTrainState:
-        model = CNN(hidden_dim=self.config.hidden_dim)
+        model = CNN(hidden_dim=self.config.hidden_dim, output_dim=self.config.output_dim)
         
         def init_single_state(key):
             init_key, state_key = jax.random.split(key)
@@ -120,26 +157,17 @@ class ReinforcementLearning(BaseAlgorithm):
         b_img, b_lbl = batch
         rng_next, key_sample = jax.random.split(state.rng)
         b_img = jnp.expand_dims(b_img, axis=-1)
+        
         def loss_fn(params):
             logits, _ = state.apply_fn({'params': params}, b_img)
-            probs = jax.nn.sigmoid(logits)
-            
-            u_rand = jax.random.uniform(key_sample, shape=logits.shape)
-            actions = (u_rand < probs).astype(jnp.float32)
-            rewards = (actions == b_lbl).astype(jnp.float32)
-            
-            neg_log_prob = optax.sigmoid_binary_cross_entropy(logits, actions)
-            loss = jnp.mean(jax.lax.stop_gradient(rewards) * neg_log_prob)
-            return loss, logits
+            loss, acc = self._rl_step_logic(logits, b_lbl, key_sample)
+            return loss, (logits, acc)
 
         grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-        (loss, logits), grads = grad_fn(state.params)
+        (loss, (logits, acc)), grads = grad_fn(state.params)
         
         new_state = state.apply_gradients(grads=grads)
         new_state = new_state.replace(rng=rng_next)
-        
-        greedy_preds = (logits > 0).astype(jnp.float32)
-        acc = jnp.mean(greedy_preds == b_lbl)
         
         return new_state, (loss, acc)
 
