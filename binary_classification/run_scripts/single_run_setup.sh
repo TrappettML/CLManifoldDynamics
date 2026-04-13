@@ -11,12 +11,11 @@ ARRAY_INDEX=$1
 # 1. Define your parameter search space
 # Add multiple values to search over them. Leave a single value to keep it constant.
 ALGORITHMS=("SL")
-# LR1_VALS=("1e-1" "1e-3")
-# LR1_VALS=("1e-2" "1e-4")
-LR1_VALS=("1E-1") # one at a time
-LR2_VALS=("1e-1" "1e-2") #"1e-3" "1e-4"
+LR1_VALS=("1e-2" "1e-3" "1e-4")
+LR1_VALS=("1e-2" "1e-3" "1e-4")
 NUM_TASKS=("20") # Constant for this particular sweep
-NUM_EPOCHS=("4000")
+NUM_EPOCHS=("1000")
+NUM_DIM_OUT=("2")
 
 # 2. Initialize empty arrays to hold the exact combinations
 COMBINED_ALG=()
@@ -31,11 +30,13 @@ for alg in "${ALGORITHMS[@]}"; do
         for lr2 in "${LR2_VALS[@]}"; do
             for task in "${NUM_TASKS[@]}"; do
                 for epoch in "${NUM_EPOCHS[@]}"; do
-                COMBINED_ALG+=("$alg")
-                COMBINED_LR1+=("$lr1")
-                COMBINED_LR2+=("$lr2")
-                COMBINED_TASKS+=("$task")
-                COMBINED_EPOCHS+=("$epoch")
+                    for d_out in "${NUM_DIM_OUT[@]}"; do
+                        COMBINED_ALG+=("$alg")
+                        COMBINED_LR1+=("$lr1")
+                        COMBINED_LR2+=("$lr2")
+                        COMBINED_TASKS+=("$task")
+                        COMBINED_EPOCHS+=("$epoch")
+                    done
                 done
             done
         done
@@ -58,6 +59,7 @@ LR1=${COMBINED_LR1[$ARRAY_INDEX]}
 LR2=${COMBINED_LR2[$ARRAY_INDEX]}
 TASKS=${COMBINED_TASKS[$ARRAY_INDEX]}
 EPOCHS=${COMBINED_EPOCHS[$ARRAY_INDEX]}
+D_OUT=${COMBINED_EPOCHS[$ARRAY_INDEX]}
 
 echo "=========================================================="
 echo "Grid Search Configuration"
@@ -75,4 +77,5 @@ python single_run.py \
     --lr1 "$LR1" \
     --lr2 "$LR2" \
     --num_tasks "$TASKS" \
-    --num_epochs "$EPOCHS" 
+    --num_epochs "$EPOCHS" \
+    --dim_out "$D_OUT" 

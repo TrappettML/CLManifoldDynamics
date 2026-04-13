@@ -84,14 +84,13 @@ class SupervisedLearning(BaseAlgorithm):
 
         def loss_fn(params):
             logits, h_reps = state.apply_fn({'params': params}, b_img)
-            _, loss = self._dim_optim(logits, b_lbl) # mean occurs in _dim_optim
-            return loss, logits
+            preds, loss = self._dim_optim(logits, b_lbl) # mean occurs in _dim_optim
+            return loss, preds
 
         grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-        (loss, logits), grads = grad_fn(state.params)
+        (loss, preds), grads = grad_fn(state.params)
         
         new_state = state.apply_gradients(grads=grads)
-        preds = (logits > 0).astype(jnp.float32)
         acc = jnp.mean(preds == b_lbl)
         
         return new_state, (loss, acc)
