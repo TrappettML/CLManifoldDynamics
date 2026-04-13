@@ -23,6 +23,7 @@ COMBINED_LR1=()
 COMBINED_LR2=()
 COMBINED_TASKS=()
 COMBINED_EPOCHS=()
+COMBINED_D_OUT=()
 
 # 3. Generate all combinations (Cartesian Product)
 for alg in "${ALGORITHMS[@]}"; do
@@ -36,6 +37,7 @@ for alg in "${ALGORITHMS[@]}"; do
                         COMBINED_LR2+=("$lr2")
                         COMBINED_TASKS+=("$task")
                         COMBINED_EPOCHS+=("$epoch")
+                        COMBINED_D_OUT+=("$d_out")
                     done
                 done
             done
@@ -59,7 +61,7 @@ LR1=${COMBINED_LR1[$ARRAY_INDEX]}
 LR2=${COMBINED_LR2[$ARRAY_INDEX]}
 TASKS=${COMBINED_TASKS[$ARRAY_INDEX]}
 EPOCHS=${COMBINED_EPOCHS[$ARRAY_INDEX]}
-D_OUT=${COMBINED_EPOCHS[$ARRAY_INDEX]}
+D_OUT=${COMBINED_D_OUT[$ARRAY_INDEX]}
 
 echo "=========================================================="
 echo "Grid Search Configuration"
@@ -69,6 +71,7 @@ echo "LR1:         $LR1"
 echo "LR2:         $LR2"
 echo "Num Tasks:   $TASKS"
 echo "Num Epochs:  $EPOCHS"
+echo "Dim Out:     $D_OUT"
 echo "=========================================================="
 
 # Execute the Python script and redirect output
