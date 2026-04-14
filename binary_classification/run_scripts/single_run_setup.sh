@@ -81,4 +81,4 @@ python single_run.py \
     --lr2 "$LR2" \
     --num_tasks "$TASKS" \
     --num_epochs "$EPOCHS" \
-    --dim_out "$D_OUT" 
+    --out_dim "$D_OUT" 
