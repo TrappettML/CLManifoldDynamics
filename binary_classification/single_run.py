@@ -131,6 +131,7 @@ def main():
         pickle.dump(config, f)
     print(f"Configuration saved to {os.path.join(config.results_dir, 'config.pkl')}")
     # ----------------------
+    
     n_task_classes = max(2, config.output_dim)
 
     # --- 3. PHASE 1: Pre-compute Class Pairs (Spec Section 2) ---
