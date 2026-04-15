@@ -20,9 +20,9 @@ def get_config_val(config, key, default=None):
 # CONFIGURATION
 # =====================================================================
 BASE_DIR = "/home/users/MTrappett/manifold/binary_classification/results/imagenet_28_gray/"
-OUTPUT_DIR = os.path.join(BASE_DIR, "SL_grid_search_plots")
+OUTPUT_DIR = os.path.join(BASE_DIR, "SL_grid_search_plots/out_dim")
 
-X_PARAM = 'num_epochs' 
+X_PARAM = 'output_dim' 
 
 # =====================================================================
 # FORMATTING
@@ -184,6 +184,10 @@ def process_single_experiment(exp_path, item_name):
     lr1 = get_config_val(config, 'lr1')
     lr2 = get_config_val(config, 'lr2')
     x_val = get_config_val(config, X_PARAM)
+    num_epochs = get_config_val(config, 'epochs_per_task')
+
+    if num_epochs != 1000:
+        return None
     
     if lr1 is None or lr2 is None:
         lr1_match = re.search(r'lr1_([0-9\.eE\-]+)', item_name)
@@ -201,6 +205,8 @@ def process_single_experiment(exp_path, item_name):
                 x_val = 1000
         else:
             x_val = 1000
+
+    
             
     if lr1 is None or lr2 is None or x_val is None:
         return None
