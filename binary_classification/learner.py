@@ -186,8 +186,10 @@ class ContinualLearner:
             hidden_dim=self.config.hidden_dim,
             r_per_dev=self.r_per_dev,
             test_data_jax=test_data_jax,
-            safety_margin=0.50 # Leaves % for XLA computation overhead
+            safety_margin=0.30 # Leaves % for XLA computation overhead
         )
+
+        chunk_size_steps = min(chunk_size_steps, 5)
     
         num_chunks = math.ceil(total_outer_steps / chunk_size_steps)
         print(f"  [Memory Manager] Executing {total_outer_steps} total logs across {num_chunks} chunk(s).", flush=True)
@@ -217,7 +219,7 @@ class ContinualLearner:
                             ti, tl = t_data[t_name]
                             (l, a), reps = self._eval_jit(s, ti, tl)
                             results[t_name] = (l, a)
-                            all_reps.append(reps)
+                            all_reps.append(reps.astype(jnp.float16))
                         return results, jnp.stack(all_reps)
                     
                     test_metrics_sparse, reps_sparse = run_eval(state_end)
@@ -290,6 +292,7 @@ class ContinualLearner:
             )
 
         del cpu_history_trees
+        jax.clear_caches()
 
         # --- Post-processing logic remains exactly the same ---
         tr_loss_dense = history_np['tr_loss'].reshape(-1, self.config.n_repeats)
