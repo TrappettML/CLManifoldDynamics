@@ -65,7 +65,7 @@ class ContinualLearner:
         """Returns flattened parameters across all repeats."""
         return jax.vmap(self._flat_fn)(state.params)
 
-    @partial(jax.jit, static_argnums=(0,))
+    @partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
     def _train_epoch_jit(self, state, batch_images, batch_labels):
         """
         Trains one epoch using jax.lax.scan over batches.
@@ -235,7 +235,7 @@ class ContinualLearner:
                 # Execute for the strict size of this chunk
                 return jax.lax.scan(outer_step, initial_state, jnp.arange(steps_in_this_chunk))
 
-            pmap_scan = jax.pmap(chunked_task_scan, in_axes=(0, 0, 0, 0))
+            pmap_scan = jax.pmap(chunked_task_scan, in_axes=(0, 0, 0, 0), donate_argnums=(0,))
 
             # Execute Chunk
             curr_state, sharded_history_chunk = pmap_scan(curr_state, sharded_imgs, sharded_lbls, sharded_test)
