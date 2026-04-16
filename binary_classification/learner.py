@@ -186,22 +186,16 @@ class ContinualLearner:
             hidden_dim=self.config.hidden_dim,
             r_per_dev=self.r_per_dev,
             test_data_jax=test_data_jax,
-            safety_margin=0.30 # Leaves % for XLA computation overhead
+            safety_margin=0.50 # Leaves % for XLA computation overhead
         )
 
-        chunk_size_steps = min(chunk_size_steps, 5)
+        # chunk_size_steps = min(chunk_size_steps, 5)
     
         num_chunks = math.ceil(total_outer_steps / chunk_size_steps)
         print(f"  [Memory Manager] Executing {total_outer_steps} total logs across {num_chunks} chunk(s).", flush=True)
 
-        cpu_history_trees = []
-        curr_state = sharded_state
-
-        for chunk_idx in range(num_chunks):
-            # Calculate static size for this specific chunk (JAX requires static size for scan)
-            steps_in_this_chunk = min(chunk_size_steps, total_outer_steps - chunk_idx * chunk_size_steps)
-            
-            # Wrap the scan function so steps_in_this_chunk is baked into the JIT logic
+        # 1. Define a factory function OUTSIDE the loop
+        def get_pmap_scan(steps):
             def chunked_task_scan(initial_state, e_imgs, e_lbls, t_data):
                 def inner_loop(carry, _):
                     new_state, tr_loss, tr_acc = self._train_epoch_jit(carry, e_imgs, e_lbls)
@@ -219,7 +213,7 @@ class ContinualLearner:
                             ti, tl = t_data[t_name]
                             (l, a), reps = self._eval_jit(s, ti, tl)
                             results[t_name] = (l, a)
-                            all_reps.append(reps.astype(jnp.float16))
+                            all_reps.append(reps)
                         return results, jnp.stack(all_reps)
                     
                     test_metrics_sparse, reps_sparse = run_eval(state_end)
@@ -234,15 +228,28 @@ class ContinualLearner:
                     }
                     return state_end, metrics
                 
-                # Execute for the strict size of this chunk
-                return jax.lax.scan(outer_step, initial_state, jnp.arange(steps_in_this_chunk))
+                return jax.lax.scan(outer_step, initial_state, jnp.arange(steps))
+            
+            return jax.pmap(chunked_task_scan, in_axes=(0, 0, 0, 0))
 
-            pmap_scan = jax.pmap(chunked_task_scan, in_axes=(0, 0, 0, 0), donate_argnums=(0,))
+        # 2. Dictionary to cache the compiled functions
+        cached_pmaps = {}
+        cpu_history_trees = []
+        curr_state = sharded_state
+
+        for chunk_idx in range(num_chunks):
+            steps_in_this_chunk = min(chunk_size_steps, total_outer_steps - chunk_idx * chunk_size_steps)
+            
+            # 3. Only create/compile if we haven't seen this step size before
+            if steps_in_this_chunk not in cached_pmaps:
+                cached_pmaps[steps_in_this_chunk] = get_pmap_scan(steps_in_this_chunk)
+                
+            pmap_scan = cached_pmaps[steps_in_this_chunk]
 
             # Execute Chunk
             curr_state, sharded_history_chunk = pmap_scan(curr_state, sharded_imgs, sharded_lbls, sharded_test)
 
-            # --- FIX: Move entire chunk to CPU RAM immediately ---
+            # --- Move entire chunk to CPU RAM immediately ---
             chunk_cpu = jax.device_get(sharded_history_chunk)
             
             # Explicitly free GPU memory reference for the chunk
@@ -349,10 +356,11 @@ def calculate_safe_chunk_size(device, num_params, hidden_dim, r_per_dev, test_da
     """
     try:
         stats = device.memory_stats()
-        free_bytes = stats['bytes_limit'] - stats['bytes_in_use']
+        # Assume the memory XLA preallocated (90%) is fully available for our arrays
+        free_bytes = stats['bytes_limit'] * 0.90 
     except Exception as e:
-        print(f"  [Warning] Could not read memory stats ({e}). Defaulting to 4GB margin.")
-        free_bytes = 4 * (1024**3)
+        print(f"  [Warning] Could not read memory stats ({e}). Defaulting to 40GB margin.")
+        free_bytes = 40 * (1024**3) * 0.90
 
     # 1. Size of representations per step: (Repeats * Total_Test_Samples * Hidden_Dim * 4 bytes for float32)
     total_test_samples = sum(t[0].shape[0] for t in test_data_jax.values())
