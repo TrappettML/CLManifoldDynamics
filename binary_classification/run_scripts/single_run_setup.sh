@@ -15,7 +15,7 @@ LR1_VALS=("1e-2" "1e-3" "1e-4")
 LR2_VALS=("1e-2" "1e-3" "1e-4")
 NUM_TASKS=("20") # Constant for this particular sweep
 NUM_EPOCHS=("1000")
-NUM_DIM_OUT=("5")
+NUM_DIM_OUT=("3")
 
 # 2. Initialize empty arrays to hold the exact combinations
 COMBINED_ALG=()

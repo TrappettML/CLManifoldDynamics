@@ -179,24 +179,39 @@ class ContinualLearner:
         dummy_flat_params = self.get_flat_params(self.state)[0]
         num_params = len(dummy_flat_params)
         
-        # Call the deterministic calculator
+        # Call the deterministic calculator (using the 0.20 safety margin from the NCCL fix)
         chunk_size_steps = calculate_safe_chunk_size(
             device=jax.devices()[0],
             num_params=num_params,
             hidden_dim=self.config.hidden_dim,
             r_per_dev=self.r_per_dev,
             test_data_jax=test_data_jax,
-            safety_margin=0.50 # Leaves % for XLA computation overhead
+            safety_margin=0.20 
         )
-
-        # chunk_size_steps = min(chunk_size_steps, 5)
     
         num_chunks = math.ceil(total_outer_steps / chunk_size_steps)
         print(f"  [Memory Manager] Executing {total_outer_steps} total logs across {num_chunks} chunk(s).", flush=True)
 
-        # 1. Define a factory function OUTSIDE the loop
+        # 1. Stack and Shard the Test Data BEFORE the chunk loop
+        test_task_names = sorted(test_data_jax.keys())
+        
+        # Original shape: [Num_Tasks, Total_Samples, Repeats, Side, Side]
+        stacked_test_imgs = jnp.stack([test_data_jax[t][0] for t in test_task_names])
+        stacked_test_lbls = jnp.stack([test_data_jax[t][1] for t in test_task_names])
+        
+        # Manually shard test data so Repeats is properly split across devices
+        def shard_stacked_test(stacked_arr):
+            s = list(stacked_arr.shape)
+            s[2:3] = [self.num_devices, self.r_per_dev] 
+            reshaped = stacked_arr.reshape(*s)
+            return jnp.moveaxis(reshaped, 2, 0) # Moves Devices to axis 0
+            
+        sharded_t_imgs = shard_stacked_test(stacked_test_imgs)
+        sharded_t_lbls = shard_stacked_test(stacked_test_lbls)
+
+        # 2. Define the chunked task scan OUTSIDE the loop
         def get_pmap_scan(steps):
-            def chunked_task_scan(initial_state, e_imgs, e_lbls, t_data):
+            def chunked_task_scan(initial_state, e_imgs, e_lbls, t_imgs_stack, t_lbls_stack):
                 def inner_loop(carry, _):
                     new_state, tr_loss, tr_acc = self._train_epoch_jit(carry, e_imgs, e_lbls)
                     return new_state, (tr_loss, tr_acc)
@@ -207,22 +222,23 @@ class ContinualLearner:
                         inner_loop, state_start, None, length=log_freq
                     )
                     
-                    def run_eval(s):
-                        results, all_reps = {}, []
-                        for t_name in sorted(t_data.keys()):
-                            ti, tl = t_data[t_name]
-                            (l, a), reps = self._eval_jit(s, ti, tl)
-                            results[t_name] = (l, a)
-                            all_reps.append(reps)
-                        return results, jnp.stack(all_reps)
+                    # SEQUENTIAL EVALUATION: Prevents XLA from evaluating 20 tasks simultaneously
+                    def eval_single_task(carry_dummy, task_data):
+                        ti, tl = task_data
+                        (l, a), reps = self._eval_jit(state_end, ti, tl)
+                        return None, ((l, a), reps)
                     
-                    test_metrics_sparse, reps_sparse = run_eval(state_end)
+                    _, ((losses_all, accs_all), reps_sparse) = jax.lax.scan(
+                        eval_single_task, None, (t_imgs_stack, t_lbls_stack)
+                    )
+                    
                     flat_w = self.get_flat_params(state_end)
                     
                     metrics = {
                         'tr_loss': block_losses,
                         'tr_acc': block_accs,
-                        'test': test_metrics_sparse,
+                        'test_loss': losses_all,
+                        'test_acc': accs_all,
                         'weights': flat_w,
                         'reps': reps_sparse
                     }
@@ -230,39 +246,40 @@ class ContinualLearner:
                 
                 return jax.lax.scan(outer_step, initial_state, jnp.arange(steps))
             
-            return jax.pmap(chunked_task_scan, in_axes=(0, 0, 0, 0))
+            return jax.pmap(chunked_task_scan, in_axes=(0, 0, 0, 0, 0))
 
-        # 2. Dictionary to cache the compiled functions
         cached_pmaps = {}
         cpu_history_trees = []
         curr_state = sharded_state
 
         for chunk_idx in range(num_chunks):
+            # Calculate static size
             steps_in_this_chunk = min(chunk_size_steps, total_outer_steps - chunk_idx * chunk_size_steps)
             
-            # 3. Only create/compile if we haven't seen this step size before
             if steps_in_this_chunk not in cached_pmaps:
                 cached_pmaps[steps_in_this_chunk] = get_pmap_scan(steps_in_this_chunk)
                 
             pmap_scan = cached_pmaps[steps_in_this_chunk]
 
             # Execute Chunk
-            curr_state, sharded_history_chunk = pmap_scan(curr_state, sharded_imgs, sharded_lbls, sharded_test)
+            curr_state, sharded_history_chunk = pmap_scan(
+                curr_state, sharded_imgs, sharded_lbls, sharded_t_imgs, sharded_t_lbls
+            )
 
-            # --- Move entire chunk to CPU RAM immediately ---
+            # Move to CPU RAM immediately
             chunk_cpu = jax.device_get(sharded_history_chunk)
-            
-            # Explicitly free GPU memory reference for the chunk
             del sharded_history_chunk
             
-            # Helper to unshard using NumPy instead of JAX
             def unshard_numpy(x, r_axis):
                 x = np.moveaxis(x, 0, r_axis)
                 shape = list(x.shape)
                 shape[r_axis : r_axis + 2] = [shape[r_axis] * shape[r_axis + 1]]
                 return x.reshape(*shape)
 
-            # Build the history tree using the CPU data
+            # Unshard metrics
+            unsharded_test_loss = unshard_numpy(chunk_cpu['test_loss'], 2)
+            unsharded_test_acc = unshard_numpy(chunk_cpu['test_acc'], 2)
+
             history_tree_cpu = {
                 'tr_loss': unshard_numpy(chunk_cpu['tr_loss'], 2),
                 'tr_acc': unshard_numpy(chunk_cpu['tr_acc'], 2),
@@ -270,10 +287,12 @@ class ContinualLearner:
                 'reps': unshard_numpy(chunk_cpu['reps'], 2),
                 'test': {}
             }
-            for t_name in chunk_cpu['test']:
+            
+            # Reconstruct the dictionary for the rest of your script
+            for i, t_name in enumerate(test_task_names):
                 history_tree_cpu['test'][t_name] = (
-                    unshard_numpy(chunk_cpu['test'][t_name][0], 1),
-                    unshard_numpy(chunk_cpu['test'][t_name][1], 1)
+                    unsharded_test_loss[:, i, :],
+                    unsharded_test_acc[:, i, :]
                 )
                 
             cpu_history_trees.append(history_tree_cpu)
