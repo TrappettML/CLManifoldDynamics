@@ -170,7 +170,7 @@ class ContinualLearner:
         sharded_lbls = shard_data(epoch_data_lbls, 1)
         sharded_test = jax.tree_util.tree_map(lambda x: shard_data(x, 1), test_data_jax)
 
-        # --- EXACT MEMORY CHUNKING ---
+        # --- MEMORY CHUNKING ---
         log_freq = self.config.log_frequency
         total_outer_steps = self.config.epochs_per_task // log_freq
         
@@ -178,20 +178,6 @@ class ContinualLearner:
         dummy_flat_params = self.get_flat_params(self.state)[0]
         num_params = len(dummy_flat_params)
         
-        # Call the deterministic calculator (using the 0.20 safety margin from the NCCL fix)
-        chunk_size_steps = min([
-            calculate_safe_chunk_size(
-                device=d,
-                num_params=num_params,
-                hidden_dim=self.config.hidden_dim,
-                r_per_dev=self.r_per_dev,
-                test_data_jax=test_data_jax,
-                safety_margin=0.20 
-            ) for d in jax.local_devices()
-        ])
-    
-        num_chunks = math.ceil(total_outer_steps / chunk_size_steps)
-        print(f"  [Memory Manager] Executing {total_outer_steps} total logs across {num_chunks} chunk(s).", flush=True)
 
         # 1. Stack and Shard the Test Data BEFORE the chunk loop
         test_task_names = sorted(test_data_jax.keys())
@@ -248,7 +234,33 @@ class ContinualLearner:
             
             return jax.pmap(chunked_task_scan, in_axes=(0, 0, 0, 0, 0), donate_argnums=(0,))
 
-        cached_pmaps = {}
+        # 3. Create dummy structures representing the input shapes and dtypes for AOT compilation
+        state_struct = jax.tree_util.tree_map(
+            lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), sharded_state
+        )
+        img_struct = jax.ShapeDtypeStruct(sharded_imgs.shape, sharded_imgs.dtype)
+        lbl_struct = jax.ShapeDtypeStruct(sharded_lbls.shape, sharded_lbls.dtype)
+        t_img_struct = jax.ShapeDtypeStruct(sharded_t_imgs.shape, sharded_t_imgs.dtype)
+        t_lbl_struct = jax.ShapeDtypeStruct(sharded_t_lbls.shape, sharded_t_lbls.dtype)
+
+        # 4. Lower a 1-step version of the pmap to extract the base HLO memory footprint
+        base_pmap = get_pmap_scan(steps=1)
+        lowered_base = base_pmap.lower(state_struct, img_struct, lbl_struct, t_img_struct, t_lbl_struct)
+
+        # 5. Execute the memory calculator with the exact compilation data
+        chunk_size_steps = min([
+            calculate_safe_chunk_size(
+                device=d,
+                lowered_scan_fn=lowered_base,
+                safety_margin=0.85 
+            ) for d in jax.local_devices()
+        ])
+    
+        num_chunks = math.ceil(total_outer_steps / chunk_size_steps)
+        print(f"  [Memory Manager] Executing {total_outer_steps} total logs across {num_chunks} chunk(s).", flush=True)
+
+        # Pre-populate cache to prevent recompiling the base map if chunk_size_steps == 1
+        cached_pmaps = {1: base_pmap}
         cpu_history_trees = []
         curr_state = sharded_state
 
@@ -378,19 +390,25 @@ def calculate_safe_chunk_size(device, lowered_scan_fn, safety_margin=0.85):
         print(f"  [Warning] Could not read memory stats ({e}). Defaulting to 40GB margin.")
         free_bytes = 40 * (1024**3) * 0.90
 
-    # Extract exact HLO memory footprint via AOT compilation analysis
-    mem_analysis = lowered_scan_fn.memory_analysis()
-    bytes_per_step = mem_analysis.generated_code_size_in_bytes + mem_analysis.temp_size_in_bytes
+    # 1. Compile the lowered function ahead-of-time to unlock exact memory statistics
+    compiled_fn = lowered_scan_fn.compile()
+    
+    # 2. Extract exact HLO memory footprint
+    mem_analysis = compiled_fn.memory_analysis()
+    
+    # Safely extract the attributes (JAX exposes these as properties on the memory_analysis object)
+    temp_size = getattr(mem_analysis, 'temp_size_in_bytes', 0)
+    code_size = getattr(mem_analysis, 'generated_code_size_in_bytes', 0)
+    
+    bytes_per_step = temp_size + code_size
 
     if bytes_per_step == 0:
         return 50 
 
+    # Calculate how many steps fit into the safe VRAM allocation
     safe_free_bytes = free_bytes * safety_margin
     chunk_size = int(safe_free_bytes / bytes_per_step)
-
-    return max(1, chunk_size)   
     
-    # Print a diagnostic summary for the user
     mb_per_step = bytes_per_step / (1024**2)
     free_mb = free_bytes / (1024**2)
     print(f"  [Memory Calc] Free VRAM: {free_mb:.0f} MB | Cost per log step: {mb_per_step:.2f} MB")
