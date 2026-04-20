@@ -1,7 +1,15 @@
 import os
 # os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 # os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".70" 
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".90" 
+# Create a dedicated directory for XLA cache
+# Define a cache directory in your storage space
+custom_tmp = "/storage/users/MTrappett/manifold/tmp_cache"
+os.makedirs(custom_tmp, exist_ok=True)
+
+# Force the OS and XLA to use this directory for temp files
+os.environ['TMPDIR'] = custom_tmp
+
 
 
 import jax
@@ -148,13 +156,13 @@ def main():
 
     # --- 4. PHASE 2: Load Global Datasets (Once) ---
     print(f"\n=== Loading Global Datasets ===")
-    X_train_global, Y_train_global = data_utils.get_base_data_jax(
+    X_train_global, Y_train_global = data_utils.get_base_data(
         config.dataset_name,
         config.data_dir,
         config,
         train=True,
     )
-    X_test_global, Y_test_global = data_utils.get_base_data_jax(
+    X_test_global, Y_test_global = data_utils.get_base_data(
         config.dataset_name,
         config.data_dir,
         config,

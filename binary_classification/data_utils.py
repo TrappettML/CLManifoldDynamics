@@ -10,13 +10,13 @@ DATASET_CONFIGS = {
     'imagenet_28_gray': {'input_side': 28, 'num_classes': 1000, 'channels': 1}
 }
 
-def get_base_data_jax(dataset_name, root, config, train):
+def get_base_data(dataset_name, root, config, train):
     """
     Loads pre-processed ImageNet dataset from .npy files and converts to JAX Arrays.
     
     Returns:
-        X: (N, Flattened_Dim) jax.numpy.array
-        Y: (N,) jax.numpy.array
+        X: (N, Flattened_Dim) numpy.array
+        Y: (N,) numpy.array
     """
     if dataset_name not in DATASET_CONFIGS:
         raise ValueError(f"Dataset {dataset_name} not found in DATASET_CONFIGS.")
@@ -41,11 +41,12 @@ def get_base_data_jax(dataset_name, root, config, train):
     n_samples = X_np.shape[0]
     X_np = X_np.reshape((n_samples, config.input_side, config.input_side))
 
-    # Convert directly to JAX
-    X_jax = jnp.array(X_np)
-    Y_jax = jnp.array(Y_np)
+    return X_np, Y_np # return numpy for memory efficiency
+    # # Convert directly to JAX
+    # X_jax = jnp.array(X_np)
+    # Y_jax = jnp.array(Y_np)
     
-    return X_jax, Y_jax
+    # return X_jax, Y_jax
 
 
 def generate_task_class_pairs(num_tasks, n_repeats, num_classes, seed, n_task_classes=2):
@@ -96,7 +97,7 @@ def generate_task_class_pairs(num_tasks, n_repeats, num_classes, seed, n_task_cl
 
 def create_single_task_data(task_idx, task_class_pairs, X_global, Y_global, config, split='train'):
     """
-    LAZY LOADING: Creates data for a single task on-demand.
+    LAZY LOADING: Creates data for a single task on-demand. Takes in np arrays and return jax arrays
     
     Args:
         task_idx: Task index (0-based)
@@ -131,11 +132,11 @@ def create_single_task_data(task_idx, task_class_pairs, X_global, Y_global, conf
         
         # 4. Extract data and map to linear integer labels
         x_list = [X_global[idx[:min_c]] for idx in indices]
-        y_list = [jnp.full((min_c, 1), i, dtype=jnp.float32) for i in range(n_task_classes)]
+        y_list = [np.full((min_c, 1), i, dtype=np.float32) for i in range(n_task_classes)]
         
         # 5. Concatenate
-        x_comb = jnp.concatenate(x_list, axis=0)
-        y_comb = jnp.concatenate(y_list, axis=0)
+        x_comb = np.concatenate(x_list, axis=0)
+        y_comb = np.concatenate(y_list, axis=0)
         
         # 6. Shuffle within repeat
         perm = np.random.permutation(len(x_comb))
