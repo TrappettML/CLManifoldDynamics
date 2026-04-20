@@ -111,7 +111,6 @@ class ContinualLearner:
         Returns:
             loss: (Repeats,)
             acc: (Repeats,)
-            reps: (total_samples, repeats, Dim)
         """
         # Transpose to (Repeats, Total_Samples, Dim) for vmap
         images_t = jnp.swapaxes(images, 0, 1)
@@ -120,8 +119,8 @@ class ContinualLearner:
         def eval_single(curr_state, curr_imgs, curr_lbls):
             return self.algo.eval_step(curr_state, (curr_imgs, curr_lbls))
         
-        evals, representations = jax.vmap(eval_single, in_axes=(0, 0, 0))(state, images_t, labels_t)
-        return evals, representations
+        evals, _ = jax.vmap(eval_single, in_axes=(0, 0, 0))(state, images_t, labels_t)
+        return evals
 
 
     def train_task(self, task, test_data_dict, global_history):
@@ -225,10 +224,10 @@ class ContinualLearner:
                     # SEQUENTIAL EVALUATION: Prevents XLA from evaluating 20 tasks simultaneously
                     def eval_single_task(carry_dummy, task_data):
                         ti, tl = task_data
-                        (l, a), reps = self._eval_jit(state_end, ti, tl)
-                        return None, ((l, a), reps)
+                        (l, a) = self._eval_jit(state_end, ti, tl)
+                        return None, (l, a)
                     
-                    _, ((losses_all, accs_all), reps_sparse) = jax.lax.scan(
+                    _, (losses_all, accs_all) = jax.lax.scan(
                         eval_single_task, None, (t_imgs_stack, t_lbls_stack)
                     )
                     
@@ -239,8 +238,7 @@ class ContinualLearner:
                         'tr_acc': block_accs,
                         'test_loss': losses_all,
                         'test_acc': accs_all,
-                        'weights': flat_w,
-                        'reps': reps_sparse
+                        'weights': flat_w
                     }
                     return state_end, metrics
                 
@@ -284,7 +282,6 @@ class ContinualLearner:
                 'tr_loss': unshard_numpy(chunk_cpu['tr_loss'], 2),
                 'tr_acc': unshard_numpy(chunk_cpu['tr_acc'], 2),
                 'weights': unshard_numpy(chunk_cpu['weights'], 1),
-                'reps': unshard_numpy(chunk_cpu['reps'], 2),
                 'test': {}
             }
             
@@ -308,7 +305,6 @@ class ContinualLearner:
             'tr_loss': np.concatenate([c['tr_loss'] for c in cpu_history_trees], axis=0),
             'tr_acc': np.concatenate([c['tr_acc'] for c in cpu_history_trees], axis=0),
             'weights': np.concatenate([c['weights'] for c in cpu_history_trees], axis=0),
-            'reps': np.concatenate([c['reps'] for c in cpu_history_trees], axis=0),
             'test': {}
         }
         for t_name in cpu_history_trees[0]['test'].keys():
@@ -346,13 +342,12 @@ class ContinualLearner:
             global_history['test_metrics'][t_name]['acc'].extend(dense_acc)
         
         weight_history = history_np['weights']
-        rep_history = history_np['reps']  
         
         for h in self.hooks:
             h.on_task_end(task, self.state, metrics=None)
         
         print(f"  Training complete for {task_name}", flush=True)
-        return rep_history, weight_history
+        return weight_history
     
     def clear_test_cache(self):
         """Clears cached test data to free memory."""
@@ -383,7 +378,6 @@ def calculate_safe_chunk_size(device, num_params, hidden_dim, r_per_dev, test_da
 
     # 1. Size of representations per step: (Repeats * Total_Test_Samples * Hidden_Dim * 4 bytes for float32)
     total_test_samples = sum(t[0].shape[0] for t in test_data_jax.values())
-    bytes_reps = r_per_dev * total_test_samples * hidden_dim * 4
     
     # 2. Size of weights per step: (Repeats * Num_Params * 4 bytes)
     bytes_weights = r_per_dev * num_params * 4
@@ -393,7 +387,7 @@ def calculate_safe_chunk_size(device, num_params, hidden_dim, r_per_dev, test_da
     bytes_metrics = r_per_dev * (2 + (num_test_tasks * 2)) * 4
     
     # Total bytes accumulated per logging step
-    bytes_per_step = bytes_reps + bytes_weights + bytes_metrics
+    bytes_per_step = bytes_weights + bytes_metrics
     
     if bytes_per_step == 0:
         return 50 # Fallback if sizes are 0 for some reason

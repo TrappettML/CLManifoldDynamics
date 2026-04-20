@@ -244,23 +244,23 @@ def main():
         # ---------------------------------------------------------
         #
         # Returns rep_history: (L, Repeats, Total_Samples, Hidden)
-        rep_history, weight_history = learner.train_task(
+        weight_history = learner.train_task(
             task, test_data_dict, global_history
         )
         # L = logged epochs
         # Reshape Representations to match Spec: (L, Repeats, N_Eval_Tasks, N_Subsamples, Hidden_Dim)
         # rep_history.shape: (10, 2, 30, 400, 64)
         #  (L, train_tasks, repeats, samples in class1 + samples in class2, h_dim)
-        if rep_history is not None:
-            L, n_Tasks, R, Samples, H = rep_history.shape
-            # need in shape: (L, R, T_eval, N_test, H)
-            rep_reshaped = np.swapaxes(rep_history, 1, 2)
-            np.save(os.path.join(task_dir, "representations.npy"), rep_reshaped)
+        # if rep_history is not None: # remove storing representations
+        #     L, n_Tasks, R, Samples, H = rep_history.shape
+        #     # need in shape: (L, R, T_eval, N_test, H)
+        #     rep_reshaped = np.swapaxes(rep_history, 1, 2)
+        #     np.save(os.path.join(task_dir, "representations.npy"), rep_reshaped)
         
         if weight_history is not None:
             np.save(os.path.join(task_dir, "weights.npy"), weight_history)
         
-        del rep_history, weight_history
+        del weight_history
 
         # Save Learner Metrics
         learner_metrics = {

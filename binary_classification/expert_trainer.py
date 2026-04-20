@@ -88,15 +88,15 @@ def train_single_expert(config, train_task, test_data):
             is_eval_step = ((epoch_idx + 1) % config.log_frequency == 0)
             
             def true_eval_fn(s):
-                return learner._eval_jit(s, test_i, test_l)[0]
+                return learner._eval_jit(s, test_i, test_l)
             
             def false_eval_fn(s):
                 dummy_shape = train_losses.shape
                 return tuple((
                     jnp.full(dummy_shape, jnp.nan, dtype=train_losses.dtype),
-                    jnp.full(dummy_shape, jnp.nan, dtype=train_accs.dtype)
-                ))
-            
+                    jnp.full(dummy_shape, jnp.nan, dtype=train_accs.dtype))
+                )
+            # jax.debug.breakpoint()
             test_losses, test_accs = jax.lax.cond(
                 is_eval_step, true_eval_fn, false_eval_fn, new_state
             )
@@ -138,7 +138,7 @@ def train_single_expert(config, train_task, test_data):
 def run_random_baseline(config, test_data_dict):
     """
     Evaluates a randomly initialized network (no training).
-    Saves representations and metrics to results/.../random/
+    Saves metrics to results/.../random/
     """
     print(f"\n{'='*40}\nRunning Random Baseline\n{'='*40}")
     
@@ -152,17 +152,17 @@ def run_random_baseline(config, test_data_dict):
     # 4. Evaluate on All Tasks
     print("  Evaluating on test sets...")
     metrics = {'acc': {}, 'loss': {}}
-    all_reps = []
+    # all_reps = []
     for task_name, (t_imgs, t_lbls) in test_data_dict.items():
-        (loss, acc), reps = learner._eval_jit(learner.state, t_imgs, t_lbls)
+        (loss, acc) = learner._eval_jit(learner.state, t_imgs, t_lbls)
         # Convert to numpy and store
         metrics['loss'][task_name] = np.array(loss) # (Repeats,)
         metrics['acc'][task_name] = np.array(acc)   # (Repeats,)
-        all_reps.append(reps)
+        # all_reps.append(reps)
 
     # 5. Save Metrics
-    metrics_reps = {'metrics': metrics, 'reps': all_reps}
-    with open(os.path.join(save_dir, "metrics_reps.pkl"), 'wb') as f:
+    metrics_reps = {'metrics': metrics}
+    with open(os.path.join(save_dir, "random_metrics.pkl"), 'wb') as f:
         pickle.dump(metrics_reps, f)
         
     print(f"  Random baseline saved to {save_dir}")
@@ -171,7 +171,7 @@ def run_random_baseline(config, test_data_dict):
 
 def train_multitask(config, task_class_pairs, X_global, Y_global, test_data_dict, analysis_subset):
     """
-    Trains Multi-Task Learner and saves representations/labels in a format
+    Trains Multi-Task Learner and saves labels in a format
     compatible with Plasticity and GLUE analysis pipelines.
     """
     print(f"\n{'='*40}\nRunning Multi-Task Learning (Upper Bound)\n{'='*40}")
@@ -212,7 +212,7 @@ def train_multitask(config, task_class_pairs, X_global, Y_global, test_data_dict
     
     print(f"  Training for {mtl_config.epochs_per_task} epochs...")
     # rep_history: (L, R, Total_Samples, H)
-    rep_history, weight_history = learner.train_task(
+    weight_history = learner.train_task(
         mtl_task, test_data_dict, mtl_history, analysis_subset=analysis_subset
     )
     
@@ -222,19 +222,19 @@ def train_multitask(config, task_class_pairs, X_global, Y_global, test_data_dict
     
     # A. Reshape Representations: (L, R, T*S, H) -> (L, R, T, S, H)
     # This enables per-task GLUE analysis
-    if rep_history is not None:
-        L, R, Total_S, H = rep_history.shape
-        T = config.num_tasks
-        S = config.analysis_subsamples
+    # if rep_history is not None:
+    #     L, R, Total_S, H = rep_history.shape
+    #     T = config.num_tasks
+    #     S = config.analysis_subsamples
         
-        # Ensure exact match before reshaping
-        if Total_S == T * S:
-            reps_reshaped = rep_history.reshape(L, R, T, S, H)
-            np.save(os.path.join(save_dir, "representations.npy"), reps_reshaped)
-            print(f"  Saved representations: {reps_reshaped.shape}")
-        else:
-            print(f"  WARNING: shape mismatch. Expected {T*S} samples, got {Total_S}. Saving raw.")
-            np.save(os.path.join(save_dir, "representations.npy"), rep_history)
+    #     # Ensure exact match before reshaping
+    #     if Total_S == T * S:
+    #         reps_reshaped = rep_history.reshape(L, R, T, S, H)
+    #         np.save(os.path.join(save_dir, "representations.npy"), reps_reshaped)
+    #         print(f"  Saved representations: {reps_reshaped.shape}")
+    #     else:
+    #         print(f"  WARNING: shape mismatch. Expected {T*S} samples, got {Total_S}. Saving raw.")
+    #         np.save(os.path.join(save_dir, "representations.npy"), rep_history)
 
     # B. Save Weights
     np.save(os.path.join(save_dir, "weights.npy"), weight_history)
@@ -243,14 +243,14 @@ def train_multitask(config, task_class_pairs, X_global, Y_global, test_data_dict
     with open(os.path.join(save_dir, "metrics.pkl"), 'wb') as f:
         pickle.dump(mtl_history, f)
         
-    # D. Save Analysis Labels (Critical for GLUE)
-    # analysis_subset[1] is (Total_Samples, R, 1) -> (T*S, R)
-    # We need (R, T, S) to match the GLUE pipeline expectation
-    if analysis_subset is not None:
-        analysis_Y = analysis_subset[1]
-        lbls_flat = analysis_Y.squeeze(-1) # (T*S, R)
-        # Reshape: (T, S, R) -> Transpose: (R, T, S)
-        lbls_reshaped = lbls_flat.reshape(T, S, R).transpose(2, 0, 1)
-        np.save(os.path.join(save_dir, "binary_labels.npy"), np.array(lbls_reshaped))
+    # # D. Save Analysis Labels (Critical for GLUE)
+    # # analysis_subset[1] is (Total_Samples, R, 1) -> (T*S, R)
+    # # We need (R, T, S) to match the GLUE pipeline expectation
+    # if analysis_subset is not None:
+    #     analysis_Y = analysis_subset[1]
+    #     lbls_flat = analysis_Y.squeeze(-1) # (T*S, R)
+    #     # Reshape: (T, S, R) -> Transpose: (R, T, S)
+    #     lbls_reshaped = lbls_flat.reshape(T, S, R).transpose(2, 0, 1)
+    #     np.save(os.path.join(save_dir, "binary_labels.npy"), np.array(lbls_reshaped))
         
     print(f"  Multi-Task results saved to {save_dir}")
