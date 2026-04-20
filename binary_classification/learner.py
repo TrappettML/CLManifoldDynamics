@@ -179,14 +179,16 @@ class ContinualLearner:
         num_params = len(dummy_flat_params)
         
         # Call the deterministic calculator (using the 0.20 safety margin from the NCCL fix)
-        chunk_size_steps = calculate_safe_chunk_size(
-            device=jax.devices()[0],
-            num_params=num_params,
-            hidden_dim=self.config.hidden_dim,
-            r_per_dev=self.r_per_dev,
-            test_data_jax=test_data_jax,
-            safety_margin=0.20 
-        )
+        chunk_size_steps = min([
+            calculate_safe_chunk_size(
+                device=d,
+                num_params=num_params,
+                hidden_dim=self.config.hidden_dim,
+                r_per_dev=self.r_per_dev,
+                test_data_jax=test_data_jax,
+                safety_margin=0.20 
+            ) for d in jax.local_devices()
+        ])
     
         num_chunks = math.ceil(total_outer_steps / chunk_size_steps)
         print(f"  [Memory Manager] Executing {total_outer_steps} total logs across {num_chunks} chunk(s).", flush=True)
