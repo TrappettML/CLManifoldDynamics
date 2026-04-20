@@ -11,8 +11,8 @@ ARRAY_INDEX=$1
 # 1. Define your parameter search space
 # Add multiple values to search over them. Leave a single value to keep it constant.
 ALGORITHMS=("SL")
-LR1_VALS=("1e-2" "1e-3" "1e-4")
-LR2_VALS=("1e-2" "1e-3" "1e-4")
+LR1_VALS=("1e-1" "1e-4")
+LR2_VALS=("1e-1" "1e-2" "1e-3" "1e-4")
 NUM_TASKS=("20") # Constant for this particular sweep
 NUM_EPOCHS=("1000")
 NUM_DIM_OUT=("3")

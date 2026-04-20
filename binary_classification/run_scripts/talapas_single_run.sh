@@ -14,7 +14,7 @@
 #SBATCH --mem=160G
 
 #SBATCH --account=tau  ### Account used for job submission
-#SBATCH --array=0-8           ### Array index
+#SBATCH --array=0-7           ### Array index
 
 module load cuda/13.0
 module load miniconda3/20240410

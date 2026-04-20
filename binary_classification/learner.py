@@ -65,7 +65,7 @@ class ContinualLearner:
         """Returns flattened parameters across all repeats."""
         return jax.vmap(self._flat_fn)(state.params)
 
-    @partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
+    @partial(jax.jit, static_argnums=(0,))
     def _train_epoch_jit(self, state, batch_images, batch_labels):
         """
         Trains one epoch using jax.lax.scan over batches.
@@ -246,7 +246,7 @@ class ContinualLearner:
                 
                 return jax.lax.scan(outer_step, initial_state, jnp.arange(steps))
             
-            return jax.pmap(chunked_task_scan, in_axes=(0, 0, 0, 0, 0))
+            return jax.pmap(chunked_task_scan, in_axes=(0, 0, 0, 0, 0), donate_argnums=(0,))
 
         cached_pmaps = {}
         cpu_history_trees = []
@@ -358,7 +358,7 @@ class ContinualLearner:
             print("  Test cache cleared")
 
 
-def calculate_safe_chunk_size(device, num_params, hidden_dim, r_per_dev, test_data_jax, safety_margin=0.85):
+def calculate_safe_chunk_size(device, lowered_scan_fn, safety_margin=0.85):
     """
     Deterministically calculates how many logging steps can safely fit in available VRAM.
     
@@ -378,25 +378,17 @@ def calculate_safe_chunk_size(device, num_params, hidden_dim, r_per_dev, test_da
         print(f"  [Warning] Could not read memory stats ({e}). Defaulting to 40GB margin.")
         free_bytes = 40 * (1024**3) * 0.90
 
-    # 1. Size of representations per step: (Repeats * Total_Test_Samples * Hidden_Dim * 4 bytes for float32)
-    total_test_samples = sum(t[0].shape[0] for t in test_data_jax.values())
-    
-    # 2. Size of weights per step: (Repeats * Num_Params * 4 bytes)
-    bytes_weights = r_per_dev * num_params * 4
-    
-    # 3. Size of metrics per step: tr_loss, tr_acc + (te_loss, te_acc per test task)
-    num_test_tasks = len(test_data_jax)
-    bytes_metrics = r_per_dev * (2 + (num_test_tasks * 2)) * 4
-    
-    # Total bytes accumulated per logging step
-    bytes_per_step = bytes_weights + bytes_metrics
-    
-    if bytes_per_step == 0:
-        return 50 # Fallback if sizes are 0 for some reason
+    # Extract exact HLO memory footprint via AOT compilation analysis
+    mem_analysis = lowered_scan_fn.memory_analysis()
+    bytes_per_step = mem_analysis.generated_code_size_in_bytes + mem_analysis.temp_size_in_bytes
 
-    # Calculate how many steps fit into the safe VRAM allocation
+    if bytes_per_step == 0:
+        return 50 
+
     safe_free_bytes = free_bytes * safety_margin
     chunk_size = int(safe_free_bytes / bytes_per_step)
+
+    return max(1, chunk_size)   
     
     # Print a diagnostic summary for the user
     mb_per_step = bytes_per_step / (1024**2)

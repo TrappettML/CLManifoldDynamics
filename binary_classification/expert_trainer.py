@@ -87,15 +87,15 @@ def train_single_expert(config, train_task, test_data):
             
             is_eval_step = ((epoch_idx + 1) % config.log_frequency == 0)
             
+            dummy_loss = jnp.zeros_like(train_losses) * jnp.nan
+            dummy_acc = jnp.zeros_like(train_accs) * jnp.nan
+            
             def true_eval_fn(s):
                 return learner._eval_jit(s, test_i, test_l)
             
             def false_eval_fn(s):
-                dummy_shape = train_losses.shape
-                return tuple((
-                    jnp.full(dummy_shape, jnp.nan, dtype=train_losses.dtype),
-                    jnp.full(dummy_shape, jnp.nan, dtype=train_accs.dtype))
-                )
+                return (dummy_loss, dummy_acc)
+            
             # jax.debug.breakpoint()
             test_losses, test_accs = jax.lax.cond(
                 is_eval_step, true_eval_fn, false_eval_fn, new_state
