@@ -358,7 +358,7 @@ def main():
         'lines.linewidth': 2
     })
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(max(12,(int(12/20)*config.num_tasks)), 8), sharex=True)
     
     epochs_range = np.arange(1, total_epochs + 1)
     task_names = [f"task_{t:03d}" for t in range(config.num_tasks)]
