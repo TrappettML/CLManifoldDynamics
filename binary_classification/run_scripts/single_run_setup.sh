@@ -18,7 +18,7 @@ LR1_VALS=("1e-1" "1e-2" "1e-3" "1e-4")
 LR2_VALS=("1e-1" "1e-2" "1e-3" "1e-4")
 NUM_TASKS=("20")
 NUM_EPOCHS=("1000")
-NUM_DIM_OUT=("5")
+NUM_DIM_OUT=("10")
 
 # Initialize arrays
 COMBINED_ALG=()
