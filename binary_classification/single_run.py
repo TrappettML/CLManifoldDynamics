@@ -1,8 +1,8 @@
 import os
 import socket
 # os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-# os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".70" 
+os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".90" 
 # Create a dedicated directory for XLA cache
 # Define a cache directory in your storage space
 if socket.gethostname() == 'saturn':
@@ -185,6 +185,7 @@ def main():
 
     # --- 7. Setup Learner ---
     learner = ContinualLearner(config, hooks=[LoggerHook()])
+    learner.prepare_static_test_data(test_data_dict)
     
     print("\nSaving random initialization weights...", flush=True)
     init_weights = learner.get_flat_params(learner.state)

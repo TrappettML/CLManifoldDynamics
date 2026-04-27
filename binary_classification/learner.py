@@ -179,22 +179,9 @@ class ContinualLearner:
         num_params = len(dummy_flat_params)
         
 
-        # 1. Stack and Shard the Test Data BEFORE the chunk loop
-        test_task_names = sorted(test_data_jax.keys())
-        
-        # Original shape: [Num_Tasks, Total_Samples, Repeats, Side, Side]
-        stacked_test_imgs = jnp.stack([test_data_jax[t][0] for t in test_task_names])
-        stacked_test_lbls = jnp.stack([test_data_jax[t][1] for t in test_task_names])
-        
-        # Manually shard test data so Repeats is properly split across devices
-        def shard_stacked_test(stacked_arr):
-            s = list(stacked_arr.shape)
-            s[2:3] = [self.num_devices, self.r_per_dev] 
-            reshaped = stacked_arr.reshape(*s)
-            return jnp.moveaxis(reshaped, 2, 0) # Moves Devices to axis 0
-            
-        sharded_t_imgs = shard_stacked_test(stacked_test_imgs)
-        sharded_t_lbls = shard_stacked_test(stacked_test_lbls)
+        sharded_t_imgs = self.sharded_t_imgs
+        sharded_t_lbls = self.sharded_t_lbls
+        test_task_names = self.test_task_names
 
         # 2. Define the chunked task scan OUTSIDE the loop
         def get_pmap_scan(steps):
@@ -252,7 +239,7 @@ class ContinualLearner:
             calculate_safe_chunk_size(
                 device=d,
                 lowered_scan_fn=lowered_base,
-                safety_margin=0.85 
+                safety_margin=0.75 
             ) for d in jax.local_devices()
         ])
     
@@ -368,6 +355,25 @@ class ContinualLearner:
         if hasattr(self, 'cached_test_data'):
             self.cached_test_data.clear()
             print("  Test cache cleared")
+    
+    def prepare_static_test_data(self, test_data_dict):
+        """Stacks and shards static test data once to prevent memory fragmentation."""
+        test_task_names = sorted(test_data_dict.keys())
+        
+        # 1. Stack
+        stacked_test_imgs = jnp.stack([test_data_dict[t][0] for t in test_task_names])
+        stacked_test_lbls = jnp.stack([test_data_dict[t][1] for t in test_task_names])
+        
+        # 2. Shard
+        def shard_stacked_test(stacked_arr):
+            s = list(stacked_arr.shape)
+            s[2:3] = [self.num_devices, self.r_per_dev] 
+            reshaped = stacked_arr.reshape(*s)
+            return jnp.moveaxis(reshaped, 2, 0)
+            
+            self.sharded_t_imgs = shard_stacked_test(stacked_test_imgs)
+            self.sharded_t_lbls = shard_stacked_test(stacked_test_lbls)
+            self.test_task_names = test_task_names
 
 
 def calculate_safe_chunk_size(device, lowered_scan_fn, safety_margin=0.85):
