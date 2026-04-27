@@ -65,7 +65,6 @@ def _random_orthogonal(n, key):
     key, subkey = jax.random.split(key)
     H = jax.random.normal(subkey, (n, n))
     Q, R = jnp.linalg.qr(H)
-    # ensure Haar measure
     Q = Q @ jnp.diag(jnp.sign(jnp.diag(R)))
     return Q, key
 
@@ -73,11 +72,10 @@ def make_spectrum(n):
     return jnp.exp(-2.0 * jnp.arange(n) / n)
 
 def build_task_ensemble(key, n_tasks, V0_ext, s, M=M_EXT):
-    """Generate n_tasks tasks with fixed U0 and shared mode subspace."""
     K = len(s)
     s2 = _hybrid_variance_matrix(M)
     key_U, key = jax.random.split(key)
-    U0, _ = _random_orthogonal(N_Y, key_U)   # same U for all tasks
+    U0, _ = _random_orthogonal(N_Y, key_U)
 
     tasks_Sigma = []
     tasks_V = []
@@ -91,12 +89,10 @@ def build_task_ensemble(key, n_tasks, V0_ext, s, M=M_EXT):
 
     return jnp.stack(tasks_Sigma), jnp.stack(tasks_V), U0, key
 
-
 # ----------------------------------------------------------------------
 #  Network and BF update
 # ----------------------------------------------------------------------
 def predict(params, x):
-    """params = (W1, W2) for level 0 (only active weights)."""
     W1, W2 = params
     return jax.nn.relu(x @ W1.T) @ W2.T
 
@@ -105,84 +101,54 @@ def loss_fn(params, x, y):
     return 0.5 * jnp.mean((y - pred) ** 2)
 
 def _bf_coeffs(m, alpha):
-    """Precompute coupling coefficients (same as original ODE)."""
     if m == 1:
-        return (0.,)*5   # no coupling
-    c_fast = 0.5 * alpha
-    mi_mid = jnp.arange(2, m)                # 2..m-1 (math indices)
-    cl_mid = 2.0 ** (-2*mi_mid + 2) * alpha
-    cr_mid = 2.0 ** (-2*mi_mid + 1) * alpha
-    cl_slow = 2.0 ** (-2*m + 2) * alpha
-    c_leak  = 2.0 ** (-2*m + 1) * alpha
-    return c_fast, cl_mid, cr_mid, cl_slow, c_leak
+        return jnp.zeros(0), 0.0
+    k = jnp.arange(m - 1)
+    g = alpha * (2.0 ** (-2 * k - 1))
+    c_leak = alpha * (2.0 ** (-2 * m + 1))
+    return g, c_leak
 
 def bf_update(state, grads, lr, coeffs):
-    W1_all, W2_all = state
-    m = W1_all.shape[0]
-    c_fast, cl_mid, cr_mid, cl_slow, c_leak = coeffs
+    W1, W2 = state
+    m = W1.shape[0]
 
-    # Gradient + fast coupling for level 0
-    dW1_0 = -grads[0]
-    dW2_0 = -grads[1]
-    if m > 1:
-        dW1_0 += -c_fast * (W1_all[0] - W1_all[1])
-        dW2_0 += -c_fast * (W2_all[0] - W2_all[1])
-    new_W1_0 = W1_all[0] + lr * dW1_0
-    new_W2_0 = W2_all[0] + lr * dW2_0
+    if m == 1:
+        return (W1.at[0].add(-lr * grads[0]), W2.at[0].add(-lr * grads[1]))
 
-    # Keep the full array – crucial to preserve shape
-    new_W1 = W1_all
-    new_W2 = W2_all
+    g, c_leak = coeffs
 
-    if m > 1:
-        # Levels 1 … m‑2 (mid chain)
-        if m > 2:
-            w1_mid = W1_all[1:-1]   # (m-2, H, N_X)
-            w2_mid = W2_all[1:-1]
-            dW1_mid = (cl_mid[:, None, None] * (W1_all[:-2] - w1_mid)
-                       - cr_mid[:, None, None] * (w1_mid - W1_all[2:]))
-            dW2_mid = (cl_mid[:, None, None] * (W2_all[:-2] - w2_mid)
-                       - cr_mid[:, None, None] * (w2_mid - W2_all[2:]))
-            new_W1 = new_W1.at[1:-1].add(lr * dW1_mid)
-            new_W2 = new_W2.at[1:-1].add(lr * dW2_mid)
+    flux_W1 = g[:, None, None] * (W1[:-1] - W1[1:])
+    flux_W2 = g[:, None, None] * (W2[:-1] - W2[1:])
 
-        # Slowest level (m‑1)
-        dW1_slow = cl_slow * (W1_all[-2] - W1_all[-1]) - c_leak * W1_all[-1]
-        dW2_slow = cl_slow * (W2_all[-2] - W2_all[-1]) - c_leak * W2_all[-1]
-        new_W1 = new_W1.at[-1].add(lr * dW1_slow)
-        new_W2 = new_W2.at[-1].add(lr * dW2_slow)
+    leak_W1 = c_leak * W1[-1:]
+    leak_W2 = c_leak * W2[-1:]
 
-    # Place the updated level 0 at the front
-    new_W1 = new_W1.at[0].set(new_W1_0)
-    new_W2 = new_W2.at[0].set(new_W2_0)
+    in_W1 = jnp.concatenate([-grads[0][None, ...], flux_W1], axis=0)
+    out_W1 = jnp.concatenate([flux_W1, leak_W1], axis=0)
+    dW1 = in_W1 - out_W1
 
-    return (new_W1, new_W2)
+    in_W2 = jnp.concatenate([-grads[1][None, ...], flux_W2], axis=0)
+    out_W2 = jnp.concatenate([flux_W2, leak_W2], axis=0)
+    dW2 = in_W2 - out_W2
+
+    return (W1 + lr * dW1, W2 + lr * dW2)
 
 # ----------------------------------------------------------------------
-#  Task‑boundary reset (JAX version)
+#  Task‑boundary reset
 # ----------------------------------------------------------------------
 def apply_reset(state, m, reset_spec):
-    if reset_spec is None:
+    if reset_spec is None or reset_spec < 0:
         return state
     W1, W2 = state
-    if isinstance(reset_spec, int):
-        k = reset_spec
-        W1 = W1.at[:k].set(W1[k])
-        W2 = W2.at[:k].set(W2[k])
-    else:   # array of weights
-        w = jnp.asarray(reset_spec, dtype=W1.dtype) / jnp.sum(reset_spec)
-        new_W1_0 = sum(w[i] * W1[i] for i in range(m))
-        new_W2_0 = sum(w[i] * W2[i] for i in range(m))
-        W1 = W1.at[0].set(new_W1_0)
-        W2 = W2.at[0].set(new_W2_0)
+    k = reset_spec
+    W1 = W1.at[:k].set(W1[k])
+    W2 = W2.at[:k].set(W2[k])
     return (W1, W2)
 
 # ----------------------------------------------------------------------
-#  Train one task (return final state, loss curve, final loss)
+#  Train one task
 # ----------------------------------------------------------------------
 def train_one_task(state, task_Sigma, key, m, coeffs, lr, n_iters, batch_size):
-    # We will record loss on a large test set at the end.
-    # For learning curves we can periodically evaluate on a fixed test batch.
     def step(state, step_key):
         key_batch, key = jax.random.split(step_key)
         x = jax.random.normal(key_batch, (batch_size, N_X))
@@ -194,7 +160,7 @@ def train_one_task(state, task_Sigma, key, m, coeffs, lr, n_iters, batch_size):
 
     keys = jax.random.split(key, n_iters)
     final_state, losses = jax.lax.scan(step, state, keys)
-    # Final population loss (large test set)
+    
     key_test, key = jax.random.split(keys[-1])
     x_test = jax.random.normal(key_test, (TEST_BATCH, N_X))
     y_test = x_test @ task_Sigma.T
@@ -202,49 +168,40 @@ def train_one_task(state, task_Sigma, key, m, coeffs, lr, n_iters, batch_size):
     return final_state, losses, final_loss, key
 
 # ----------------------------------------------------------------------
-#  Run full sequence (one trial, one condition)
+#  Run full sequence
 # ----------------------------------------------------------------------
 def run_sequence(task_Sigmas, task_Vs, s, V0_obs, key, m, reset_spec, alpha=ALPHA_BF):
-    """Takes pre‑generated task Sigmas/Vs and runs the task‑by‑task loop."""
     n_tasks = len(task_Sigmas)
-    # Initialise state
-    key_init, key = jax.random.split(key)
-    W1 = jnp.zeros((m, N_H, N_X))
-    W2 = jnp.zeros((m, N_Y, N_H))
-    W1 = W1.at[0].set(1e-2 * jax.random.normal(key_init, (N_H, N_X)))
-    W2 = W2.at[0].set(1e-2 * jax.random.normal(key_init, (N_Y, N_H)))
+    
+    key_init1, key_init2, key = jax.random.split(key, 3)
+    init_W1 = jax.random.normal(key_init1, (N_H, N_X)) * jnp.sqrt(2.0 / N_X)
+    init_W2 = jax.random.normal(key_init2, (N_Y, N_H)) * jnp.sqrt(2.0 / N_H)
+    
+    W1 = jnp.tile(init_W1, (m, 1, 1))
+    W2 = jnp.tile(init_W2, (m, 1, 1))
     state = (W1, W2)
 
     coeffs = _bf_coeffs(m, alpha)
 
-    # Accumulators
     init_losses = jnp.zeros(n_tasks)
     final_losses = jnp.zeros(n_tasks)
     null_losses = jnp.zeros(n_tasks)
-    all_loss_curves = []   # list of loss curves per task
-    selectivity = []       # V0 response per task
+    all_loss_curves = []
+    selectivity = []
 
     for k in range(n_tasks):
         Sigma_k = task_Sigmas[k]
-        # task‑boundary reset (skip first task)
         if k > 0:
             state = apply_reset(state, m, reset_spec)
 
-        # Null loss (weights zero)
-        null_loss = 0.5 * jnp.sum(Sigma_k ** 2)
-        null_losses = null_losses.at[k].set(null_loss)
+        null_losses = null_losses.at[k].set(0.5 * jnp.sum(Sigma_k ** 2))
 
-        # Init loss (before training)
-        init_loss = loss_fn((state[0][0], state[1][0]),
-                            jnp.zeros((1, N_X)), jnp.zeros((1, N_Y)))  # dummy just using active params
-        # Better: compute on a test batch
         key_test, key = jax.random.split(key)
         x_test = jax.random.normal(key_test, (TEST_BATCH, N_X))
         y_test = x_test @ Sigma_k.T
         init_loss = loss_fn((state[0][0], state[1][0]), x_test, y_test)
         init_losses = init_losses.at[k].set(init_loss)
 
-        # Train
         key_train, key = jax.random.split(key)
         state, losses, final_loss, key = train_one_task(
             state, Sigma_k, key_train, m, coeffs, LR, N_ITERS, BATCH_SIZE
@@ -252,45 +209,40 @@ def run_sequence(task_Sigmas, task_Vs, s, V0_obs, key, m, reset_spec, alpha=ALPH
         final_losses = final_losses.at[k].set(final_loss)
         all_loss_curves.append(losses)
 
-        # Selectivity: compute linear product W2[0]@W1[0] response to V0 modes
-        W0_eff = state[1][0] @ state[0][0]   # (N_Y, N_X)
-        K = V0_obs.shape[1]
+        W0_eff = state[1][0] @ state[0][0]
+        K_dim = V0_obs.shape[1]
         resp = jnp.array([jnp.linalg.norm(W0_eff @ V0_obs[:, a]) / s[a]
-                          for a in range(K)])
+                          for a in range(K_dim)])
         selectivity.append(resp)
 
-    # Forward transfer efficiency (task 2..N)
     ft = 1.0 - init_losses[1:] / null_losses[1:]
 
     return {
         "init_loss": init_losses,
         "final_loss": final_losses,
         "ft": ft,
-        "loss_curves": jnp.stack(all_loss_curves),   # (n_tasks, n_iters)
-        "selectivity": jnp.stack(selectivity),        # (n_tasks, K)
-        "V_matrices": task_Vs                         # (n_tasks, N_X, K)
+        "loss_curves": jnp.stack(all_loss_curves),
+        "selectivity": jnp.stack(selectivity),
+        "V_matrices": task_Vs
     }
 
-
 # ----------------------------------------------------------------------
-#  Wrapper for vmap (one trial)
+#  Wrapper for vmap
 # ----------------------------------------------------------------------
 def single_trial(key, m, reset_spec):
-    """Generate tasks and run a full trial. Returns all metrics."""
-    # Build extended basis and spectrum (shared across trials)
     key_v0, key = jax.random.split(key)
     V0_ext, _ = jnp.linalg.qr(jax.random.normal(key_v0, (N_X, M_EXT)))
     V0_obs = V0_ext[:, :N_Y]
     s = make_spectrum(N_Y)
 
-    # Generate task ensemble
     (task_Sigmas, task_Vs, U0, key) = build_task_ensemble(
         key, N_TASKS, V0_ext, s, M_EXT
     )
-    del U0   # not needed further
+    return run_sequence(task_Sigmas, task_Vs, s, V0_obs, key, m, reset_spec)
 
-    results = run_sequence(task_Sigmas, task_Vs, s, V0_obs, key, m, reset_spec)
-    return results
+@partial(jax.jit, static_argnames=['m', 'reset_spec'])
+def run_trials_vmap(keys, m, reset_spec):
+    return jax.vmap(partial(single_trial, m=m, reset_spec=reset_spec))(keys)
 
 # ----------------------------------------------------------------------
 #  Conditions
@@ -305,62 +257,31 @@ conditions = [
 ]
 
 # ----------------------------------------------------------------------
-#  Main experiment with vmap
+#  Main experiment
 # ----------------------------------------------------------------------
 def run_2l_bf_nl():
-    # Prepare PRNG keys for all trials and conditions
     master_key = jax.random.PRNGKey(42)
     trial_keys = jax.random.split(master_key, N_TRIALS)
 
-    # Create a grid: for each trial and each condition, we need a unique key.
-    # We'll vmap over (trial_key, condition_index).
-    # So we need to expand keys and cond indices to same shape.
-    n_cond = len(conditions)
-
-    # keys: (N_TRIALS, n_cond, 2) maybe just split each trial key further
-    trial_keys_rep = jnp.repeat(trial_keys[:, None], n_cond, axis=1)  # (N_TRIALS, n_cond)
-    # condition indices: (N_TRIALS, n_cond)
-    cond_idx = jnp.arange(n_cond)[None, :] + jnp.zeros((N_TRIALS, n_cond), dtype=int)
-
-    # Build static parameters for each condition
-    m_list = jnp.array([c[1] for c in conditions])
-    reset_list = jnp.array([c[2] if isinstance(c[2], int) else -1 for c in conditions], dtype=int)  # placeholder for None
-
-    # vmap over leading two axes
-    @partial(jax.vmap, in_axes=(0, 0, 0, None))
-    def vmapped_run(key, m_val, reset_val, unused_cond_idx):
-        # We need to treat reset_spec: None cannot be in JAX array directly.
-        # So we pass it via a separate static list.
-        # Better: use jax.vmap with static_argnums? We'll do a loop over conditions and vmap over trials only.
-        pass
-
-    # Instead, we loop over conditions and vmap over trials.
     all_results = {}
     for cond_idx, (cond_name, m, reset_spec) in enumerate(conditions):
         print(f"Running condition: {cond_name}")
-        # For each trial, create a fresh key from trial_keys
-        # We'll split each trial_key into a dedicated key for this condition
         cond_keys = jax.vmap(lambda k: jax.random.fold_in(k, cond_idx))(trial_keys)
-        # vmap over trials
-        run_fn = partial(single_trial, m=m, reset_spec=reset_spec)
-        vmapped = jax.vmap(run_fn)
-        results = vmapped(cond_keys)   # dict of arrays with leading axis N_TRIALS
+        results = run_trials_vmap(cond_keys, m=m, reset_spec=reset_spec)
         all_results[cond_name] = results
         print(f"  ft mean: {results['ft'].mean():.3f}")
 
     # ------ Analysis & Plots ------
-    # 1. Forward transfer efficiency
     fig, ax = plt.subplots(figsize=(7, 4.5))
     task_x = jnp.arange(2, N_TASKS+1)
     colors = ["C7", "C2", "C0", "C3", "C1", "k"]
     lss    = [":", "--", "-", "-", "-.", ":"]
     for (cond_name, *_), col, ls in zip(conditions, colors, lss):
-        ft_all = all_results[cond_name]["ft"]   # (N_TRIALS, N_TASKS-1)
+        ft_all = all_results[cond_name]["ft"]
         mean_ft = ft_all.mean(axis=0)
         sem_ft = ft_all.std(axis=0) / jnp.sqrt(N_TRIALS)
         ax.plot(task_x, mean_ft, color=col, ls=ls, label=cond_name)
-        ax.fill_between(task_x, mean_ft - sem_ft, mean_ft + sem_ft,
-                        color=col, alpha=0.15)
+        ax.fill_between(task_x, mean_ft - sem_ft, mean_ft + sem_ft, color=col, alpha=0.15)
     ax.axhline(0, color='k', lw=0.5, alpha=0.4)
     ax.set(xlabel="Task number", ylabel="Forward transfer efficiency",
            title=f"Forward transfer (mean ± SEM over {N_TRIALS} trials)")
@@ -369,12 +290,11 @@ def run_2l_bf_nl():
     fig.savefig(RESULTS_DIR / "bf_sgd_ft.pdf")
     plt.close()
 
-    # 2. Learning curves (task 15)
     fig, ax = plt.subplots(figsize=(6,4))
     task_idx = 14
     for (cond_name, *_), col, ls in zip(conditions, colors, lss):
-        lc = all_results[cond_name]["loss_curves"]   # (N_TRIALS, N_TASKS, N_ITERS)
-        mean_lc = lc[:, task_idx, :].mean(axis=0)    # average over trials
+        lc = all_results[cond_name]["loss_curves"]
+        mean_lc = lc[:, task_idx, :].mean(axis=0)
         ax.plot(mean_lc, color=col, ls=ls, label=cond_name)
     ax.set_yscale('log')
     ax.set(xlabel="SGD step", ylabel="MSE loss",
@@ -384,11 +304,7 @@ def run_2l_bf_nl():
     fig.savefig(RESULTS_DIR / "bf_sgd_lc.pdf")
     plt.close()
 
-    # 3. Alignment matrices (using true V from tasks)
-    # Assume the V matrices are identical across trials? They differ per trial because task rotations are random.
-    # We'll pick the first trial for demonstration, or average over trials.
-    # The provided functions compute alignment from V_emp (n_tasks, N_X, K). We'll use one trial.
-    example_V = all_results["no reset"]["V_matrices"][0]  # (N_TASKS, N_X, N_Y)
+    example_V = all_results["no reset"]["V_matrices"][0]
     def compute_alignment_matrix(V_emp):
         num_tasks, *_ = V_emp.shape
         dots = jnp.abs(jnp.einsum('kai, laj -> klij', V_emp, V_emp))
@@ -407,7 +323,6 @@ def run_2l_bf_nl():
     plt.savefig(RESULTS_DIR / "mode_alignment_avg.pdf")
     plt.close()
 
-    # Pairwise alignment heatmaps
     n_tasks_show = min(5, N_TASKS)
     fig, axes = plt.subplots(n_tasks_show, n_tasks_show,
                              figsize=(2*n_tasks_show, 2*n_tasks_show))
@@ -428,15 +343,13 @@ def run_2l_bf_nl():
     plt.savefig(RESULTS_DIR / "mode_alignment_pairs.pdf")
     plt.close()
 
-    # 4. Selectivity ratio (mean over tasks)
     fig, ax = plt.subplots()
     for (cond_name, *_), col, ls in zip(conditions, colors, lss):
-        sel = all_results[cond_name]["selectivity"]  # (N_TRIALS, N_TASKS, K)
-        # ratio lead/trail: modes 1-4 vs 5-10
+        sel = all_results[cond_name]["selectivity"]
         lead = sel[:, :, :4].mean(axis=-1)
         trail = sel[:, :, 4:].mean(axis=-1) + 1e-12
         ratio = lead / trail
-        ratio_mean = ratio.mean(axis=0)   # over trials
+        ratio_mean = ratio.mean(axis=0)
         ratio_sem = ratio.std(axis=0) / jnp.sqrt(N_TRIALS)
         ax.errorbar(jnp.arange(1, N_TASKS+1), ratio_mean, yerr=ratio_sem,
                      color=col, ls=ls, label=cond_name)
