@@ -117,15 +117,11 @@ def _bf_coeffs(m, alpha):
     return c_fast, cl_mid, cr_mid, cl_slow, c_leak
 
 def bf_update(state, grads, lr, coeffs):
-    """One SGD + BF relaxation step.
-    state: (W1_all, W2_all) where W1_all shape (m, N_H, N_X), W2_all (m, N_Y, N_H)
-    grads: (grad_W1_0, grad_W2_0) for level 0 only.
-    """
     W1_all, W2_all = state
     m = W1_all.shape[0]
     c_fast, cl_mid, cr_mid, cl_slow, c_leak = coeffs
 
-    # Update level 0 with gradient + fast coupling (if m>1)
+    # Gradient + fast coupling for level 0
     dW1_0 = -grads[0]
     dW2_0 = -grads[1]
     if m > 1:
@@ -134,29 +130,29 @@ def bf_update(state, grads, lr, coeffs):
     new_W1_0 = W1_all[0] + lr * dW1_0
     new_W2_0 = W2_all[0] + lr * dW2_0
 
-    # Update deeper levels (coupling only)
-    new_W1 = W1_all.at[1:].get()   # avoid in-place
-    new_W2 = W2_all.at[1:].get()
-    if m > 2:
-        # levels 1 .. m-2  (0‑indexed 1..m-2)
-        w1_mid = W1_all[1:-1]   # (mid_len, N_H, N_X)
-        w2_mid = W2_all[1:-1]
-        # cl_mid, cr_mid shape (mid_len,)
-        # dW_i = cl_mid*(W_{i-1} - W_i) - cr_mid*(W_i - W_{i+1})
-        dW1_mid = cl_mid[:,None,None]*(W1_all[:-2] - w1_mid) \
-                  - cr_mid[:,None,None]*(w1_mid - W1_all[2:])
-        dW2_mid = cl_mid[:,None,None]*(W2_all[:-2] - w2_mid) \
-                  - cr_mid[:,None,None]*(w2_mid - W2_all[2:])
-        new_W1 = new_W1.at[:-1].add(lr * dW1_mid)
-        new_W2 = new_W2.at[:-1].add(lr * dW2_mid)
+    # Keep the full array – crucial to preserve shape
+    new_W1 = W1_all
+    new_W2 = W2_all
 
-    # Slowest level (m-1)
-    dW1_slow = cl_slow*(W1_all[-2] - W1_all[-1]) - c_leak*W1_all[-1]
-    dW2_slow = cl_slow*(W2_all[-2] - W2_all[-1]) - c_leak*W2_all[-1]
-    new_W1 = new_W1.at[-1].add(lr * dW1_slow)
-    new_W2 = new_W2.at[-1].add(lr * dW2_slow)
+    if m > 1:
+        # Levels 1 … m‑2 (mid chain)
+        if m > 2:
+            w1_mid = W1_all[1:-1]   # (m-2, H, N_X)
+            w2_mid = W2_all[1:-1]
+            dW1_mid = (cl_mid[:, None, None] * (W1_all[:-2] - w1_mid)
+                       - cr_mid[:, None, None] * (w1_mid - W1_all[2:]))
+            dW2_mid = (cl_mid[:, None, None] * (W2_all[:-2] - w2_mid)
+                       - cr_mid[:, None, None] * (w2_mid - W2_all[2:]))
+            new_W1 = new_W1.at[1:-1].add(lr * dW1_mid)
+            new_W2 = new_W2.at[1:-1].add(lr * dW2_mid)
 
-    # Put level 0 back
+        # Slowest level (m‑1)
+        dW1_slow = cl_slow * (W1_all[-2] - W1_all[-1]) - c_leak * W1_all[-1]
+        dW2_slow = cl_slow * (W2_all[-2] - W2_all[-1]) - c_leak * W2_all[-1]
+        new_W1 = new_W1.at[-1].add(lr * dW1_slow)
+        new_W2 = new_W2.at[-1].add(lr * dW2_slow)
+
+    # Place the updated level 0 at the front
     new_W1 = new_W1.at[0].set(new_W1_0)
     new_W2 = new_W2.at[0].set(new_W2_0)
 
