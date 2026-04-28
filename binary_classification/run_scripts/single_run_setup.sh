@@ -3,7 +3,7 @@
 # ============================================
 # CONFIGURATION SWITCH
 # ============================================
-MODE="grid"   # grid or list
+MODE="list"   # grid or list
 # ============================================
 
 if [ -z "$1" ]; then
@@ -53,11 +53,17 @@ elif [ "$MODE" = "list" ]; then
     # --- Explicit list of combinations ---
     # Format: "alg lr1 lr2 tasks epochs d_out"
     COMBOS=(
+        "SL 1e-4 1e-2 20 1000 1"
+        "SL 1e-4 1e-1 20 1000 1"
+        "SL 1e-1 1e-1 20 1000 1"
+        "SL 1e-1 1e-4 20 1000 1"
         "SL 1e-1 1e-1 20 1000 2"
         "SL 1e-1 1e-2 20 1000 2"
         "SL 1e-1 1e-3 20 1000 2"
         "SL 1e-1 1e-4 20 1000 2"
-
+        "SL 1e-3 1e-4 20 1000 3"
+        "SL 1e-3 1e-1 20 1000 3"
+        "SL 1e-2 1e-1 20 1000 3"
     )
 
     for combo in "${COMBOS[@]}"; do
