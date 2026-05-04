@@ -46,12 +46,12 @@ def process_representation_pair(h_i: jnp.ndarray, h_j: jnp.ndarray, max_k: int) 
     Computes decomposition and overlap metrics for a pair of representations.
     Returns the absolute similarity matrix and subspace overlap statistics.
     """
-    _, _, U_i = compute_representation_decomposition(h_i)
-    _, _, U_j = compute_representation_decomposition(h_j)
+    _, _, U_i, n_sig_sigmas = compute_representation_decomposition(h_i.T) # transpose to get (nPoints,D_h) shape
+    _, _, U_j, n_sig_sigmas = compute_representation_decomposition(h_j.T)
 
     # Absolute value resolves arbitrary sign assignments in SVD
     M_ij = jnp.abs(compare_representation_decompositions(U_i, U_j))
-    set_trace()
+    # set_trace()
     overlaps, null_med, null_mean, p_vals, conf_bands = cumul_subspace_overlap(
         U_i, U_j, K=max_k, n_permutations=2000
     )
@@ -87,9 +87,9 @@ def compute_cross_task_metrics(reps: Dict[int, np.ndarray]) -> Tuple[Dict, Dict,
                 h_j = jnp.array(reps[j][trial, -1, :, :])
                 
                 M_ij, overlaps, null_med, null_mean, p_vals, conf_bands = process_jitted(
-                    h_i, h_j, max_k=n_h
+                    h_i, h_j, max_k=20
                 )
-                set_trace()
+                # set_trace()
                 t_M.append(M_ij)
                 t_overlaps.append(overlaps)
                 t_n_med.append(null_med)
@@ -240,8 +240,8 @@ def run_pipeline(target_path: str):
 
     print(f"Generating visualizations. Saving to {plots_dir}...")
     plot_similarity_matrix_grid(M_dict, task_indices, plots_dir)
-    plot_overlap_trace_grid(overlap_dict, task_indices, n_h, plots_dir)
-    plot_global_averages(M_dict, overlap_dict, n_h, plots_dir)
+    plot_overlap_trace_grid(overlap_dict, task_indices, 20, plots_dir)
+    plot_global_averages(M_dict, overlap_dict, 20, plots_dir)
     print("Execution complete.")
 
 

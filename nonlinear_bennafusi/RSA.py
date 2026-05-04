@@ -7,7 +7,7 @@ def compare_representation_decompositions(U1: jnp.ndarray, U2: jnp.ndarray):
     Compares two U vectors to return a matrix of similarity:
     M_ab = U1^{\top} @ U2
     Args:
-        U1: singular vectors of shape PxP (column vectors)
+        U1: singular vectors of shape PxP (column vectors), where P is the number of points
         U2: singular vectors of shape PxP (column vectors)
 
     Returns:
@@ -85,13 +85,39 @@ def cumul_subspace_overlap(U1: jnp.ndarray, U2: jnp.ndarray, K: int = 20, n_perm
     return overlaps_k, null_k_median, null_k_mean, p_values, conf_bands
 
 
+def get_n_important_modes(singular_values, variance_threshold=0.95):
+    """
+    Return the index with which to select the n_important singular values 
+    based on a cumulative explained variance threshold.
+    
+    Args:
+        singular_values: 1D array of singular values (eigenvalues of the covariance matrix)
+                         sorted in descending order.
+        variance_threshold: Float between 0 and 1 representing the target 
+                            cumulative explained variance ratio.
+                            
+    Returns:
+        n_important_values: Integer index/count of modes to keep.
+    """
+    # Calculate cumulative explained variance ratio
+    cumulative_variance = jnp.cumsum(singular_values)
+    explained_variance_ratio = cumulative_variance / cumulative_variance[-1]
+    
+    # jnp.argmax returns the first index where the condition evaluates to True.
+    # Add 1 to convert the 0-based index into the total count of required modes.
+    n_important_values = jnp.argmax(explained_variance_ratio >= variance_threshold) + 1
+    
+    return n_important_values
+
+
 @jax.jit
 def compute_representation_decomposition(h: jnp.ndarray):
     """
     Computes the representation covariance matrix R and its SVD decomposition.
     
     Args:
-        h: Hidden representations matrix of shape (P, D_h).
+        h: Hidden representations matrix of shape (P, D_h). 
+            Where P is the number of points and D_h is the hidden dimension size. 
         
     Returns:
         R: Covariance/Gram matrix of shape (P, P).
@@ -103,8 +129,9 @@ def compute_representation_decomposition(h: jnp.ndarray):
     
     R = h_centered @ h_centered.T
     U, lambdas, _ = jnp.linalg.svd(R, full_matrices=False)
+    n_important_modes = get_n_important_modes(lambdas)
     
-    return R, lambdas, U
+    return R, lambdas, U, n_important_modes
 
 
 def test_pipeline():
@@ -159,3 +186,30 @@ def test_pipeline():
 
 if __name__ == "__main__":
     test_pipeline()
+
+    """
+    test_pipline() output:
+
+    ((saturn_mandi_env) ) MTrappett@saturn:~/manifold/nonlinear_bennafusi$ python RSA.py 
+    --- Dataset 1 ---
+    Input shape (P, D_h): (100, 64)
+    R shape: (100, 100)
+    Reconstruction Error (Max Abs Diff): 1.599407e-02
+
+    --- Dataset 2 ---
+    Input shape (P, D_h): (100, 64)
+    R shape: (100, 100)
+    Reconstruction Error (Max Abs Diff): 1.902008e-02
+
+    --- Representation Comparison ---
+    Similarity Matrix M shape: (100, 100)
+
+    --- Subspace Overlap (K=20) ---
+    Overlaps shape: (20,)
+    Null Medians shape: (20,)
+    P-values shape: (20,)
+    Confidence Bands (Lower/Upper) shapes: (20,), (20,)
+
+    Results for k=1: Overlap = 0.0015, Null Median = 0.0049, P-value = 0.7075
+    Results for k=20: Overlap = 0.1892, Null Median = 0.2002, P-value = 0.8300
+    """

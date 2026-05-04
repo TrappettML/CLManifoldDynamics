@@ -18,7 +18,7 @@ LR = 0.05
 BATCH_SIZE = 256
 N_ITERS = 5000           
 N_TASKS = 10
-N_TRIALS = 10            
+N_TRIALS = 10  # repeats          
 TEST_BATCH = 2000        
 
 max_pow = int(np.log2(N_ITERS)) if N_ITERS > 0 else 0
@@ -26,7 +26,7 @@ _cp = [0] + [2**i for i in range(max_pow + 1)]
 if _cp[-1] < N_ITERS - 1:
     _cp.append(N_ITERS - 1)
 CHECKPOINTS = jnp.unique(jnp.array(_cp, dtype=jnp.int32))
-NUM_CP = len(CHECKPOINTS)
+NUM_CP = len(CHECKPOINTS) # perform checkpointing to as to reduce computation
 
 RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
